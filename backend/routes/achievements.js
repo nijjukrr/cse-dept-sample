@@ -9,6 +9,8 @@ function isMissingColumnError(error) {
   return error.code === '42703' || error.code === 'PGRST204' || (error.message && error.message.includes('Could not find'));
 }
 
+const { formatAchievementWithSignedUrl, deleteUploadedFileFromUrl } = require('./uploads');
+
 // Helper to clear relevant caches after achievement updates
 async function clearAchievementCaches() {
   await cache.flush();
@@ -90,7 +92,7 @@ router.get('/all/pending', authMiddleware, adminMiddleware, async (req, res) => 
     result = result.filter(a => a.class === scope.advisingClass && a.batch === scope.advisingBatch);
   }
 
-  res.json(result);
+  res.json(await formatAchievementWithSignedUrl(result));
 });
 
 // ─── GET /api/achievements/user/:userId ──────────────────────────────────────
@@ -122,7 +124,7 @@ router.get('/user/:userId', optionalAuthMiddleware, async (req, res) => {
 
   if (error) return res.status(500).json({ error: 'Failed to fetch achievements' });
   const formatted = (achs || []).map(formatAchievement);
-  res.json(formatted);
+  res.json(await formatAchievementWithSignedUrl(formatted));
 });
 
 // ─── POST /api/achievements ───────────────────────────────────────────────────
@@ -172,15 +174,12 @@ router.post('/', authMiddleware, async (req, res) => {
 
   if (error || !inserted) {
     if (proof_url) {
-      try {
-        const { deleteUploadedFileFromUrl } = require('./uploads');
-        deleteUploadedFileFromUrl('achievement-proofs', proof_url).catch(() => {});
-      } catch (e) {}
+      deleteUploadedFileFromUrl('achievement-proofs', proof_url).catch(() => {});
     }
     return res.status(500).json({ error: 'Failed to add achievement' });
   }
   await clearAchievementCaches();
-  res.status(201).json(formatAchievement(inserted));
+  res.status(201).json(await formatAchievementWithSignedUrl(formatAchievement(inserted)));
 });
 
 async function getStudentCanonicalScore(userId) {
@@ -212,7 +211,7 @@ async function getStudentCanonicalScore(userId) {
 router.delete('/:id', authMiddleware, async (req, res) => {
   let { data: ach } = await supabase
     .from('achievements')
-    .select('user_id')
+    .select('user_id, proof_url')
     .eq('id', req.params.id)
     .maybeSingle();
 
@@ -223,6 +222,11 @@ router.delete('/:id', authMiddleware, async (req, res) => {
   const isTeacher = req.user.role !== 'student';
   if (!isOwner && !isTeacher) {
     return res.status(403).json({ error: 'Not authorized to delete this achievement.' });
+  }
+
+  // Cleanup storage object if it is a private storage reference
+  if (ach.proof_url && ach.proof_url.startsWith('storage://achievement-proofs/')) {
+    deleteUploadedFileFromUrl('achievement-proofs', ach.proof_url).catch(() => {});
   }
 
   const { error } = await supabase.from('achievements').delete().eq('id', req.params.id);

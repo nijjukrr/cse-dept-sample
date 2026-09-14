@@ -430,7 +430,8 @@ router.get('/advisor/achievements', facultyAdvisorMiddleware, async (req, res) =
     students: profileMap[a.user_id] || null
   }));
 
-  res.json(result);
+  const { formatAchievementWithSignedUrl } = require('./uploads');
+  res.json(await formatAchievementWithSignedUrl(result));
 });
 
 // PATCH /api/admin/advisor/achievements/:id - Approve or reject achievement
