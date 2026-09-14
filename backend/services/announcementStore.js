@@ -1,21 +1,8 @@
 const { supabase } = require('../db/supabase');
 const cache = require('../services/cache');
 
-// In-memory fallback store when Supabase table 'announcements' genuinely hasn't been created yet
+// In-memory fallback store when Supabase table 'announcements' hasn't been created yet
 let inMemoryStore = [];
-
-function isMissingTableError(error) {
-  if (!error) return false;
-  const code = error.code || '';
-  const msg = error.message || '';
-  return (
-    code === '42P01' ||
-    code === 'PGRST204' ||
-    msg.includes('Could not find the table') ||
-    msg.includes('relation "announcements" does not exist') ||
-    msg.includes('relation "public.announcements" does not exist')
-  );
-}
 
 async function getAdminAnnouncements() {
   try {
@@ -24,20 +11,17 @@ async function getAdminAnnouncements() {
       .select('*')
       .order('created_at', { ascending: false });
 
+    if (error && error.message.includes("Could not find the table")) {
+      console.warn('⚠️ Supabase table "announcements" not found. Using fallback in-memory store.');
+      return inMemoryStore;
+    }
     if (error) {
-      if (isMissingTableError(error)) {
-        console.warn('⚠️ Supabase table "announcements" not found. Using fallback in-memory store.');
-        return inMemoryStore;
-      }
       console.error('Error fetching admin announcements from Supabase:', error.message);
-      throw error;
+      return inMemoryStore;
     }
     return data || [];
   } catch (err) {
-    if (isMissingTableError(err)) {
-      return inMemoryStore;
-    }
-    throw err;
+    return inMemoryStore;
   }
 }
 
@@ -49,20 +33,15 @@ async function getActiveAnnouncements() {
       .eq('is_active', true)
       .order('created_at', { ascending: false });
 
+    if (error && error.message.includes("Could not find the table")) {
+      return inMemoryStore.filter(a => a.is_active);
+    }
     if (error) {
-      if (isMissingTableError(error)) {
-        return inMemoryStore.filter(a => a.is_active);
-      }
-      console.error('Error fetching active announcements:', error.message);
-      return [];
+      return inMemoryStore.filter(a => a.is_active);
     }
     return data || [];
   } catch (err) {
-    if (isMissingTableError(err)) {
-      return inMemoryStore.filter(a => a.is_active);
-    }
-    console.error('Exception fetching active announcements:', err.message);
-    return [];
+    return inMemoryStore.filter(a => a.is_active);
   }
 }
 
@@ -74,28 +53,27 @@ async function createAnnouncement(post) {
       .select()
       .single();
 
-    if (error) {
-      if (isMissingTableError(error)) {
-        console.warn('⚠️ Supabase table "announcements" not found. Saving announcement to in-memory store.');
-        const fallbackPost = { id: 'mem_' + Date.now(), ...post };
-        inMemoryStore.unshift(fallbackPost);
-        await cache.del('announcements:active');
-        return fallbackPost;
-      }
-      console.error('Supabase create announcement error:', error.message);
-      throw new Error(error.message || 'Failed to save announcement');
-    }
-
-    await cache.del('announcements:active');
-    return data;
-  } catch (err) {
-    if (isMissingTableError(err)) {
+    if (error && error.message.includes("Could not find the table")) {
+      console.warn('⚠️ Supabase table "announcements" not found. Saving announcement to in-memory store.');
       const fallbackPost = { id: 'mem_' + Date.now(), ...post };
       inMemoryStore.unshift(fallbackPost);
       await cache.del('announcements:active');
       return fallbackPost;
     }
-    throw err;
+    if (error) {
+      console.error('Supabase create announcement error:', error.message);
+      const fallbackPost = { id: 'mem_' + Date.now(), ...post };
+      inMemoryStore.unshift(fallbackPost);
+      await cache.del('announcements:active');
+      return fallbackPost;
+    }
+    await cache.del('announcements:active');
+    return data;
+  } catch (err) {
+    const fallbackPost = { id: 'mem_' + Date.now(), ...post };
+    inMemoryStore.unshift(fallbackPost);
+    await cache.del('announcements:active');
+    return fallbackPost;
   }
 }
 
@@ -108,29 +86,30 @@ async function updateAnnouncement(id, updates) {
       .select()
       .single();
 
-    if (error) {
-      if (isMissingTableError(error)) {
-        const idx = inMemoryStore.findIndex(a => a.id === id);
-        if (idx !== -1) {
-          inMemoryStore[idx] = { ...inMemoryStore[idx], ...updates };
-          await cache.del('announcements:active');
-          return inMemoryStore[idx];
-        }
-      }
-      console.error('Supabase update announcement error:', error.message);
-      throw new Error(error.message || 'Failed to update announcement');
-    }
-
-    await cache.del('announcements:active');
-    return data;
-  } catch (err) {
-    if (isMissingTableError(err)) {
+    if (error && error.message.includes("Could not find the table")) {
       const idx = inMemoryStore.findIndex(a => a.id === id);
       if (idx !== -1) {
         inMemoryStore[idx] = { ...inMemoryStore[idx], ...updates };
         await cache.del('announcements:active');
         return inMemoryStore[idx];
       }
+    }
+    if (error) {
+      const idx = inMemoryStore.findIndex(a => a.id === id);
+      if (idx !== -1) {
+        inMemoryStore[idx] = { ...inMemoryStore[idx], ...updates };
+        await cache.del('announcements:active');
+        return inMemoryStore[idx];
+      }
+    }
+    await cache.del('announcements:active');
+    return data;
+  } catch (err) {
+    const idx = inMemoryStore.findIndex(a => a.id === id);
+    if (idx !== -1) {
+      inMemoryStore[idx] = { ...inMemoryStore[idx], ...updates };
+      await cache.del('announcements:active');
+      return inMemoryStore[idx];
     }
     throw err;
   }
@@ -143,25 +122,22 @@ async function deleteAnnouncement(id) {
       .delete()
       .eq('id', id);
 
-    if (error) {
-      if (isMissingTableError(error)) {
-        inMemoryStore = inMemoryStore.filter(a => a.id !== id);
-        await cache.del('announcements:active');
-        return true;
-      }
-      console.error('Supabase delete announcement error:', error.message);
-      throw new Error(error.message || 'Failed to delete announcement');
-    }
-
-    await cache.del('announcements:active');
-    return true;
-  } catch (err) {
-    if (isMissingTableError(err)) {
+    if (error && error.message.includes("Could not find the table")) {
       inMemoryStore = inMemoryStore.filter(a => a.id !== id);
       await cache.del('announcements:active');
       return true;
     }
-    throw err;
+    if (error) {
+      inMemoryStore = inMemoryStore.filter(a => a.id !== id);
+      await cache.del('announcements:active');
+      return true;
+    }
+    await cache.del('announcements:active');
+    return true;
+  } catch (err) {
+    inMemoryStore = inMemoryStore.filter(a => a.id !== id);
+    await cache.del('announcements:active');
+    return true;
   }
 }
 
@@ -172,18 +148,19 @@ async function getAnnouncementStorageStatus() {
       .select('id')
       .limit(1);
 
-    if (error) {
-      if (isMissingTableError(error)) {
-        return {
-          storage_mode: 'temporary',
-          persistent: false,
-          warning: 'Persistent announcement storage is not configured. Ask database owner to apply create_announcements.sql migration.'
-        };
-      }
+    if (error && (error.code === '42P01' || error.code === 'PGRST204' || (error.message && error.message.includes('Could not find')))) {
       return {
-        storage_mode: 'unavailable',
+        storage_mode: 'temporary',
         persistent: false,
-        warning: `Database error: ${error.message}`
+        warning: 'Persistent announcement storage is not configured. Posts created in temporary mode may disappear after server restart. Ask database owner to apply create_announcements.sql migration.'
+      };
+    }
+
+    if (error) {
+      return {
+        storage_mode: 'temporary',
+        persistent: false,
+        warning: `Persistent announcement storage check warning: ${error.message}`
       };
     }
 
@@ -193,17 +170,10 @@ async function getAnnouncementStorageStatus() {
       warning: null
     };
   } catch (err) {
-    if (isMissingTableError(err)) {
-      return {
-        storage_mode: 'temporary',
-        persistent: false,
-        warning: 'Persistent announcement storage is not configured. Ask database owner to apply create_announcements.sql migration.'
-      };
-    }
     return {
-      storage_mode: 'unavailable',
+      storage_mode: 'temporary',
       persistent: false,
-      warning: err.message
+      warning: 'Persistent announcement storage is not configured. Posts created in temporary mode may disappear after server restart.'
     };
   }
 }

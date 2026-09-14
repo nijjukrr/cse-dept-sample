@@ -211,26 +211,46 @@ async function getStudentCanonicalScore(userId) {
 router.delete('/:id', authMiddleware, async (req, res) => {
   let { data: ach } = await supabase
     .from('achievements')
-    .select('user_id, proof_url')
+    .select('id, user_id, proof_url')
     .eq('id', req.params.id)
     .maybeSingle();
 
   if (!ach) return res.status(404).json({ error: 'Achievement not found' });
   
-  // Allow if owner OR if non-student (faculty/admin)
   const isOwner = ach.user_id === req.user.id;
-  const isTeacher = req.user.role !== 'student';
-  if (!isOwner && !isTeacher) {
-    return res.status(403).json({ error: 'Not authorized to delete this achievement.' });
+
+  // Authorization Boundary Check
+  if (!isOwner) {
+    // If student user is not owner -> 403 Forbidden
+    if (req.user.role === 'student') {
+      return res.status(403).json({ error: 'Not authorized to delete this achievement.' });
+    }
+
+    // Faculty or Admin authorization check using getAdminScope
+    const scope = await getAdminScope(req.user.id, req.user.role);
+    if (!scope.hasFullAccess) {
+      const { data: student } = await supabase
+        .from('students')
+        .select('class, batch')
+        .eq('user_id', ach.user_id)
+        .maybeSingle();
+
+      if (!student || student.class !== scope.advisingClass || student.batch !== scope.advisingBatch) {
+        return res.status(403).json({ error: 'You can only delete achievements for students in your assigned class/batch.' });
+      }
+    }
   }
 
-  // Cleanup storage object if it is a private storage reference
-  if (ach.proof_url && ach.proof_url.startsWith('storage://achievement-proofs/')) {
-    deleteUploadedFileFromUrl('achievement-proofs', ach.proof_url).catch(() => {});
-  }
-
+  // Database Deletion
   const { error } = await supabase.from('achievements').delete().eq('id', req.params.id);
   if (error) return res.status(500).json({ error: 'Failed to delete achievement' });
+
+  // Cleanup private storage object ONLY AFTER authorization & DB deletion succeeded
+  if (ach.proof_url && ach.proof_url.startsWith('storage://achievement-proofs/')) {
+    deleteUploadedFileFromUrl('achievement-proofs', ach.proof_url).catch((err) => {
+      console.warn(`Failed to cleanup storage object for deleted achievement ${req.params.id}:`, err);
+    });
+  }
 
   await clearAchievementCaches();
   const canonical = await getStudentCanonicalScore(ach.user_id);
