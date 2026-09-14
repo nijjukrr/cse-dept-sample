@@ -41,9 +41,14 @@ function areAchievementsEqual(aList, bList) {
       a.status !== b.status ||
       a.verified !== b.verified ||
       a.title !== b.title ||
-      a.proof_url !== b.proof_url ||
+      a.description !== b.description ||
+      a.position !== b.position ||
+      a.duration !== b.duration ||
       a.student_name !== b.student_name ||
-      a.description !== b.description
+      a.roll_no !== b.roll_no ||
+      a.class !== b.class ||
+      a.batch !== b.batch ||
+      a.created_at !== b.created_at
     ) {
       return false;
     }
