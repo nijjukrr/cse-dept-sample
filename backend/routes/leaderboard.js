@@ -94,27 +94,40 @@ async function buildLeaderboard(batchFilter, classFilter, limit) {
 // ─── GET /api/leaderboard/stats ───────────────────────────────────────────────
 router.get('/stats', async (req, res) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  const [
-    { count: totalStudents },
-    { count: totalAchievements },
-    { count: totalWins },
-    { count: totalInternships },
-    { count: activeTeams }
-  ] = await Promise.all([
-    supabase.from('students').select('*', { count: 'exact', head: true }),
-    supabase.from('achievements').select('*', { count: 'exact', head: true }).eq('verified', true),
-    supabase.from('achievements').select('*', { count: 'exact', head: true }).eq('verified', true).eq('type', 'hackathon').eq('position', '1st'),
-    supabase.from('achievements').select('*', { count: 'exact', head: true }).eq('verified', true).eq('type', 'internship'),
-    supabase.from('teams').select('*', { count: 'exact', head: true }),
-  ]);
+  try {
+    const [
+      { data: studentRows },
+      { data: achRows },
+      { count: activeTeams }
+    ] = await Promise.all([
+      supabase.from('students').select('user_id'),
+      supabase.from('achievements').select('user_id, type, position, verified, description').eq('verified', true),
+      supabase.from('teams').select('*', { count: 'exact', head: true })
+    ]);
 
-  res.json({
-    totalStudents: totalStudents || 0,
-    totalAchievements: totalAchievements || 0,
-    totalHackathonWins: totalWins || 0,
-    totalInternships: totalInternships || 0,
-    activeTeams: activeTeams || 0,
-  });
+    const validStudentUserIds = new Set((studentRows || []).map(s => s.user_id));
+
+    const validApproved = (achRows || []).filter(a => 
+      validStudentUserIds.has(a.user_id) && 
+      (!a.description || !a.description.trim().toUpperCase().includes('[REJECTED:'))
+    );
+
+    const totalStudents = studentRows ? studentRows.length : 0;
+    const totalAchievements = validApproved.length;
+    const totalHackathonWins = validApproved.filter(a => a.type === 'hackathon' && a.position === '1st').length;
+    const totalInternships = validApproved.filter(a => a.type === 'internship').length;
+
+    res.json({
+      totalStudents,
+      totalAchievements,
+      totalHackathonWins,
+      totalInternships,
+      activeTeams: activeTeams || 0,
+    });
+  } catch (err) {
+    console.error('Leaderboard stats error:', err);
+    res.status(500).json({ error: 'Failed to fetch leaderboard statistics' });
+  }
 });
 
 // ─── GET /api/leaderboard/top ─────────────────────────────────────────────────

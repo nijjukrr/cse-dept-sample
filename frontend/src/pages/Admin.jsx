@@ -19,11 +19,36 @@ import {
 const CLASSES = ['CSE-A', 'CSE-B', 'CSE-C', 'CSE-D', 'CSE-E'];
 const CATEGORIES = ['Important', 'Hackathon Winner', 'Placement', 'Department Update', 'Event', 'Achievement', 'General'];
 
+function areAchievementsEqual(aList, bList) {
+  if (!aList || !bList) return aList === bList;
+  if (aList.length !== bList.length) return false;
+  for (let i = 0; i < aList.length; i++) {
+    const a = aList[i];
+    const b = bList[i];
+    if (!a || !b) return false;
+    if (
+      a.id !== b.id ||
+      a.status !== b.status ||
+      a.verified !== b.verified ||
+      a.title !== b.title ||
+      a.proof_url !== b.proof_url ||
+      a.student_name !== b.student_name ||
+      a.description !== b.description
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export default function Admin() {
   const { user, isAdmin, refreshUser } = useAuth();
   const location = useLocation();
   const [students, setStudents] = useState([]);
   const [achievements, setAchievements] = useState([]);
+  const achievementsRef = useRef(achievements);
+  achievementsRef.current = achievements;
+  const isFetchingPendingRef = useRef(false);
   const [pendingLoading, setPendingLoading] = useState(true);
   const [pendingError, setPendingError] = useState(null);
   const pendingSeqRef = useRef(0);
@@ -110,44 +135,53 @@ export default function Admin() {
     }).finally(() => setLoading(false));
   }, []);
 
-  // Background synchronization for Pending Achievements tab (3s polling when active & visible)
+  // Silent background synchronization for Pending Achievements tab (3s polling when active & visible)
   useEffect(() => {
     let intervalId = null;
 
-    const fetchPending = async () => {
-      if (document.hidden) return;
+    const fetchPending = async ({ silent = false } = {}) => {
+      if (document.hidden || isFetchingPendingRef.current) return;
+      isFetchingPendingRef.current = true;
       const currentSeq = ++pendingSeqRef.current;
-      setPendingLoading(true);
+
+      if (!silent && achievementsRef.current.length === 0) {
+        setPendingLoading(true);
+      }
       setPendingError(null);
+
       try {
         const res = await client.get('/achievements/all/pending');
         if (currentSeq >= pendingSeqRef.current) {
-          setAchievements(res.data || []);
+          const newData = res.data || [];
+          if (!areAchievementsEqual(achievementsRef.current, newData)) {
+            setAchievements(newData);
+          }
           setPendingError(null);
         }
       } catch (err) {
         if (currentSeq >= pendingSeqRef.current) {
           console.warn('Pending background sync error:', err);
-          setPendingError('Unable to load pending submissions.');
+          if (!silent) setPendingError('Unable to load pending submissions.');
         }
       } finally {
-        if (currentSeq >= pendingSeqRef.current) {
+        isFetchingPendingRef.current = false;
+        if (currentSeq >= pendingSeqRef.current && !silent) {
           setPendingLoading(false);
         }
       }
     };
 
     if (tab === 'pending') {
-      fetchPending();
-      intervalId = setInterval(fetchPending, 3000);
+      fetchPending({ silent: achievementsRef.current.length > 0 });
+      intervalId = setInterval(() => fetchPending({ silent: true }), 3000);
     }
 
     const handleFocus = () => {
-      if (tab === 'pending') fetchPending();
+      if (tab === 'pending') fetchPending({ silent: true });
     };
 
     const handlePendingUpdated = () => {
-      fetchPending();
+      if (tab === 'pending') fetchPending({ silent: true });
     };
 
     window.addEventListener('focus', handleFocus);

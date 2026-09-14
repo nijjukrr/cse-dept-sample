@@ -38,6 +38,9 @@ export default function Profile() {
     setTimeout(() => setToast(null), 3000);
   };
 
+  const achievementsRef = useRef(achievements);
+  achievementsRef.current = achievements;
+
   const fetchData = async () => {
     const currentSeq = ++fetchSeqRef.current;
     try {
@@ -48,7 +51,12 @@ export default function Profile() {
       ]);
       if (currentSeq >= fetchSeqRef.current) {
         setUser(userRes.data);
-        setAchievements(achRes.data);
+        const newAchs = achRes.data || [];
+        const isSame = achievementsRef.current.length === newAchs.length && 
+          achievementsRef.current.every((a, idx) => a.id === newAchs[idx]?.id && a.status === newAchs[idx]?.status && a.verified === newAchs[idx]?.verified);
+        if (!isSame) {
+          setAchievements(newAchs);
+        }
         setTeams(teamRes.data);
 
         if (authUser?.id === id) {

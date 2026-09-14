@@ -29,9 +29,34 @@ const DURATION_LABEL = {
   long: '⏱️ 3+ Months' 
 };
 
+function areAchievementsEqual(aList, bList) {
+  if (!aList || !bList) return aList === bList;
+  if (aList.length !== bList.length) return false;
+  for (let i = 0; i < aList.length; i++) {
+    const a = aList[i];
+    const b = bList[i];
+    if (!a || !b) return false;
+    if (
+      a.id !== b.id ||
+      a.status !== b.status ||
+      a.verified !== b.verified ||
+      a.title !== b.title ||
+      a.proof_url !== b.proof_url ||
+      a.student_name !== b.student_name ||
+      a.description !== b.description
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export default function Approvals() {
   const { user, isAdmin } = useAuth();
   const [achievements, setAchievements] = useState([]);
+  const achievementsRef = useRef(achievements);
+  achievementsRef.current = achievements;
+  const isFetchingRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(null);
   const [search, setSearch] = useState('');
@@ -48,32 +73,37 @@ export default function Approvals() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  const fetchPending = async (isInitial = false) => {
-    if (document.hidden) return;
+  const fetchPending = async ({ isInitial = false } = {}) => {
+    if (document.hidden || isFetchingRef.current) return;
+    isFetchingRef.current = true;
     const currentSeq = ++fetchSeqRef.current;
-    if (isInitial) setLoading(true);
+    if (isInitial && achievementsRef.current.length === 0) setLoading(true);
     setFetchError(null);
     try {
       const res = await client.get('/achievements/all/pending');
       if (currentSeq >= fetchSeqRef.current) {
-        setAchievements(res.data || []);
+        const newData = res.data || [];
+        if (!areAchievementsEqual(achievementsRef.current, newData)) {
+          setAchievements(newData);
+        }
         setFetchError(null);
       }
     } catch {
       if (currentSeq >= fetchSeqRef.current) {
-        setFetchError('Unable to load pending submissions.');
+        if (isInitial) setFetchError('Unable to load pending submissions.');
         if (isInitial) showToast('Failed to load pending achievements.', 'error');
       }
     } finally {
+      isFetchingRef.current = false;
       if (currentSeq >= fetchSeqRef.current && isInitial) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchPending(true);
-    const interval = setInterval(() => fetchPending(false), 3000);
-    const handleFocus = () => fetchPending(false);
-    const handlePendingUpdated = () => fetchPending(false);
+    fetchPending({ isInitial: achievementsRef.current.length === 0 });
+    const interval = setInterval(() => fetchPending({ isInitial: false }), 3000);
+    const handleFocus = () => fetchPending({ isInitial: false });
+    const handlePendingUpdated = () => fetchPending({ isInitial: false });
 
     window.addEventListener('focus', handleFocus);
     window.addEventListener('pendingUpdated', handlePendingUpdated);
