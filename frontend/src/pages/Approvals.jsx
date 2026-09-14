@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Navigate, Link } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
@@ -33,6 +33,7 @@ export default function Approvals() {
   const { user, isAdmin } = useAuth();
   const [achievements, setAchievements] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [classFilter, setClassFilter] = useState('all');
@@ -40,6 +41,7 @@ export default function Approvals() {
   const [toast, setToast] = useState(null);
   const [rejectConfirm, setRejectConfirm] = useState(null);
   const [rejectionReason, setRejectionReason] = useState('');
+  const fetchSeqRef = useRef(0);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -47,20 +49,29 @@ export default function Approvals() {
   };
 
   const fetchPending = async (isInitial = false) => {
+    if (document.hidden) return;
+    const currentSeq = ++fetchSeqRef.current;
     if (isInitial) setLoading(true);
+    setFetchError(null);
     try {
       const res = await client.get('/achievements/all/pending');
-      setAchievements(res.data);
+      if (currentSeq >= fetchSeqRef.current) {
+        setAchievements(res.data || []);
+        setFetchError(null);
+      }
     } catch {
-      if (isInitial) showToast('Failed to load pending achievements.', 'error');
+      if (currentSeq >= fetchSeqRef.current) {
+        setFetchError('Unable to load pending submissions.');
+        if (isInitial) showToast('Failed to load pending achievements.', 'error');
+      }
     } finally {
-      if (isInitial) setLoading(false);
+      if (currentSeq >= fetchSeqRef.current && isInitial) setLoading(false);
     }
   };
 
   useEffect(() => {
     fetchPending(true);
-    const interval = setInterval(() => fetchPending(false), 5000);
+    const interval = setInterval(() => fetchPending(false), 3000);
     const handleFocus = () => fetchPending(false);
     const handlePendingUpdated = () => fetchPending(false);
 

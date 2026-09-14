@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
@@ -31,6 +31,7 @@ export default function Profile() {
   const [submittingAch, setSubmittingAch] = useState(false);
   const [toast, setToast] = useState(null);
   const isOwn = authUser?.id === id;
+  const fetchSeqRef = useRef(0);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -38,22 +39,25 @@ export default function Profile() {
   };
 
   const fetchData = async () => {
+    const currentSeq = ++fetchSeqRef.current;
     try {
       const [userRes, achRes, teamRes] = await Promise.all([
         client.get(`/users/${id}`).catch(err => { console.error(err); return { data: null }; }),
         client.get(`/achievements/user/${id}`).catch(err => { console.error(err); return { data: [] }; }),
         client.get(`/teams/user/${id}`).catch(err => { console.error(err); return { data: [] }; })
       ]);
-      setUser(userRes.data);
-      setAchievements(achRes.data);
-      setTeams(teamRes.data);
+      if (currentSeq >= fetchSeqRef.current) {
+        setUser(userRes.data);
+        setAchievements(achRes.data);
+        setTeams(teamRes.data);
 
-      if (authUser?.id === id) {
-        const { data: invRes } = await client.get('/teams/my-invites');
-        setInvites(invRes);
+        if (authUser?.id === id) {
+          const { data: invRes } = await client.get('/teams/my-invites').catch(() => ({ data: [] }));
+          if (currentSeq >= fetchSeqRef.current) setInvites(invRes || []);
+        }
       }
     } finally {
-      setLoading(false);
+      if (currentSeq >= fetchSeqRef.current) setLoading(false);
     }
   };
 
@@ -70,7 +74,11 @@ export default function Profile() {
 
   useEffect(() => { 
     fetchData();
-    const interval = setInterval(fetchData, 5000);
+    const interval = setInterval(() => {
+      if (!document.hidden) {
+        fetchData();
+      }
+    }, 5000);
     const handleFocus = () => fetchData();
 
     window.addEventListener('focus', handleFocus);

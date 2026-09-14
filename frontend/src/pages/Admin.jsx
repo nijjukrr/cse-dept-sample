@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, Navigate, useLocation } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
@@ -24,6 +24,9 @@ export default function Admin() {
   const location = useLocation();
   const [students, setStudents] = useState([]);
   const [achievements, setAchievements] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(true);
+  const [pendingError, setPendingError] = useState(null);
+  const pendingSeqRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -83,14 +86,10 @@ export default function Admin() {
   useEffect(() => {
     refreshUser();
     const cachedStudents = sessionStorage.getItem('admin_overview_students');
-    const cachedPending = sessionStorage.getItem('admin_overview_pending');
     let hasCache = false;
 
     if (cachedStudents) {
       try { setStudents(JSON.parse(cachedStudents)); hasCache = true; } catch (e) {}
-    }
-    if (cachedPending) {
-      try { setAchievements(JSON.parse(cachedPending)); hasCache = true; } catch (e) {}
     }
 
     if (hasCache) setLoading(false);
@@ -105,12 +104,61 @@ export default function Admin() {
       }
       if (aRes?.data) {
         setAchievements(aRes.data);
-        sessionStorage.setItem('admin_overview_pending', JSON.stringify(aRes.data));
       }
     }).catch(err => {
       console.warn('Overview fetch warning:', err);
     }).finally(() => setLoading(false));
   }, []);
+
+  // Background synchronization for Pending Achievements tab (3s polling when active & visible)
+  useEffect(() => {
+    let intervalId = null;
+
+    const fetchPending = async () => {
+      if (document.hidden) return;
+      const currentSeq = ++pendingSeqRef.current;
+      setPendingLoading(true);
+      setPendingError(null);
+      try {
+        const res = await client.get('/achievements/all/pending');
+        if (currentSeq >= pendingSeqRef.current) {
+          setAchievements(res.data || []);
+          setPendingError(null);
+        }
+      } catch (err) {
+        if (currentSeq >= pendingSeqRef.current) {
+          console.warn('Pending background sync error:', err);
+          setPendingError('Unable to load pending submissions.');
+        }
+      } finally {
+        if (currentSeq >= pendingSeqRef.current) {
+          setPendingLoading(false);
+        }
+      }
+    };
+
+    if (tab === 'pending') {
+      fetchPending();
+      intervalId = setInterval(fetchPending, 3000);
+    }
+
+    const handleFocus = () => {
+      if (tab === 'pending') fetchPending();
+    };
+
+    const handlePendingUpdated = () => {
+      fetchPending();
+    };
+
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('pendingUpdated', handlePendingUpdated);
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('pendingUpdated', handlePendingUpdated);
+    };
+  }, [tab]);
 
   // Load managed students with cache boost
   const loadManagedStudents = useCallback(async () => {
@@ -395,8 +443,11 @@ export default function Admin() {
 
   const [rejectingAch, setRejectingAch] = useState(null);
   const [rejectionReasonInput, setRejectionReasonInput] = useState('');
+  const [processingAchIds, setProcessingAchIds] = useState({});
 
   const verifyAch = async (id, approved) => {
+    if (processingAchIds[id]) return;
+
     if (!approved) {
       const targetAch = achievements.find(a => a.id === id);
       if (targetAch) {
@@ -406,40 +457,53 @@ export default function Admin() {
       return;
     }
 
-    const targetAch = achievements.find(a => a.id === id);
-    setAchievements(prev => prev.filter(a => a.id !== id));
-    showToast('Achievement approved ✅', 'success');
-    window.dispatchEvent(new Event('pendingUpdated'));
+    setProcessingAchIds(prev => ({ ...prev, [id]: 'approving' }));
 
     try {
       await client.patch(`/achievements/${id}/approve`);
-    } catch {
-      if (targetAch) setAchievements(prev => [targetAch, ...prev]);
-      showToast('Approval failed.', 'error');
+      setAchievements(prev => prev.filter(a => a.id !== id));
+      showToast('Achievement approved ✅', 'success');
       window.dispatchEvent(new Event('pendingUpdated'));
+      window.dispatchEvent(new Event('scoreUpdated'));
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Approval failed.', 'error');
+    } finally {
+      setProcessingAchIds(prev => {
+        const copy = { ...prev };
+        delete copy[id];
+        return copy;
+      });
     }
   };
 
   const handleConfirmReject = async () => {
     if (!rejectingAch) return;
+    const ach = rejectingAch;
+    if (processingAchIds[ach.id]) return;
+
     if (!rejectionReasonInput || !rejectionReasonInput.trim()) {
       showToast('Please enter a rejection reason.', 'error');
       return;
     }
-    const ach = rejectingAch;
     const reason = rejectionReasonInput.trim();
     setRejectingAch(null);
 
-    setAchievements(prev => prev.filter(a => a.id !== ach.id));
-    showToast(`✕ Rejected submission for ${ach.student_name}.`, 'error');
-    window.dispatchEvent(new Event('pendingUpdated'));
+    setProcessingAchIds(prev => ({ ...prev, [ach.id]: 'rejecting' }));
 
     try {
       await client.patch(`/achievements/${ach.id}/reject`, { rejection_reason: reason });
-    } catch {
-      setAchievements(prev => [ach, ...prev]);
-      showToast('Rejection failed.', 'error');
+      setAchievements(prev => prev.filter(a => a.id !== ach.id));
+      showToast(`✕ Rejected submission for ${ach.student_name}.`, 'error');
       window.dispatchEvent(new Event('pendingUpdated'));
+      window.dispatchEvent(new Event('scoreUpdated'));
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Rejection failed.', 'error');
+    } finally {
+      setProcessingAchIds(prev => {
+        const copy = { ...prev };
+        delete copy[ach.id];
+        return copy;
+      });
     }
   };
 
@@ -1212,10 +1276,9 @@ export default function Admin() {
               </div>
             )}
 
-            {/* ── PENDING ACHIEVEMENTS (Connected to Approvals Portal) ── */}
+            {/* ── PENDING ACHIEVEMENTS ── */}
             {tab === 'pending' && (
               <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                {/* Connected Banner linking directly to Approvals */}
                 <div className="card" style={{ padding: '24px 28px', background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.12) 0%, rgba(168, 85, 247, 0.08) 100%)', border: '1.5px solid var(--color-green)', borderRadius: 'var(--radius-lg)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
                     <div>
@@ -1226,13 +1289,37 @@ export default function Admin() {
                         Review, verify, or reject student achievement claims (hackathons, internships, certifications).
                       </p>
                     </div>
-                    <Link to="/approvals" className="btn btn-primary btn-lg" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
-                      <CheckCircle size={18} /> Open Full Approvals Portal →
-                    </Link>
                   </div>
                 </div>
 
-                {achievements.length === 0 ? (
+                {pendingLoading && achievements.length === 0 ? (
+                  <div className="card" style={{ padding: '48px 24px', textAlign: 'center' }}>
+                    <RefreshCw size={32} className="spin" color="var(--color-green)" style={{ margin: '0 auto 12px' }} />
+                    <h3 style={{ fontSize: 16, fontWeight: 600 }}>Loading pending submissions...</h3>
+                  </div>
+                ) : pendingError && achievements.length === 0 ? (
+                  <div className="card" style={{ padding: '36px 24px', textAlign: 'center', borderColor: 'var(--color-red)' }}>
+                    <XCircle size={36} color="var(--color-red)" style={{ margin: '0 auto 12px' }} />
+                    <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-text)' }}>Unable to load pending submissions.</h3>
+                    <button className="btn btn-outline btn-sm" onClick={() => {
+                      const currentSeq = ++pendingSeqRef.current;
+                      setPendingLoading(true);
+                      setPendingError(null);
+                      client.get('/achievements/all/pending')
+                        .then(res => {
+                          if (currentSeq >= pendingSeqRef.current) setAchievements(res.data || []);
+                        })
+                        .catch(() => {
+                          if (currentSeq >= pendingSeqRef.current) setPendingError('Unable to load pending submissions.');
+                        })
+                        .finally(() => {
+                          if (currentSeq >= pendingSeqRef.current) setPendingLoading(false);
+                        });
+                    }} style={{ marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <RefreshCw size={14} /> Retry
+                    </button>
+                  </div>
+                ) : achievements.length === 0 ? (
                   <div className="empty-state card" style={{ padding: '48px 24px', textAlignment: 'center' }}>
                     <div className="empty-icon" style={{ marginBottom: '16px' }}>
                       <Inbox size={48} color="var(--color-green)" strokeWidth={1.5} opacity={0.6} />
@@ -1242,25 +1329,61 @@ export default function Admin() {
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    {achievements.map(a => (
-                      <div key={a.id} className="card" style={{ padding: '18px 20px' }}>
-                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                              <span className={`badge type-${a.type} badge`}>{a.type}</span>
-                              <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>by {a.student_name} ({a.roll_no})</span>
+                    {achievements.map(a => {
+                      const isProcessing = Boolean(processingAchIds[a.id]);
+                      const procType = processingAchIds[a.id];
+                      return (
+                        <div key={a.id} className="card" style={{ padding: '18px 20px', opacity: isProcessing ? 0.7 : 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                            <div style={{ flex: 1, minWidth: 260 }}>
+                              <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                                <span className={`badge type-${a.type} badge`}>{a.type}</span>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
+                                  {a.student_name} ({a.roll_no || '—'})
+                                </span>
+                                {(a.class || a.batch) && (
+                                  <span className="badge badge-subtle" style={{ fontSize: 11 }}>
+                                    {[a.class, a.batch].filter(Boolean).join(' • ')}
+                                  </span>
+                                )}
+                              </div>
+                              <h4 style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{a.title}</h4>
+                              {a.description && <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>{a.description}</p>}
+                              
+                              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                {a.position && <span><strong>Position:</strong> {a.position}</span>}
+                                {a.duration && <span><strong>Duration:</strong> {a.duration}</span>}
+                                {a.created_at && <span><strong>Submitted:</strong> {new Date(a.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</span>}
+                              </div>
+
+                              {a.proof_url && (
+                                <a href={a.proof_url} target="_blank" rel="noopener noreferrer" className="badge badge-violet" style={{ marginTop: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                  <ExternalLink size={12} /> View Proof
+                                </a>
+                              )}
                             </div>
-                            <h4 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>{a.title}</h4>
-                            {a.description && <p style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{a.description}</p>}
-                            {a.proof_url && <a href={a.proof_url} target="_blank" rel="noopener noreferrer" className="badge badge-violet" style={{ marginTop: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}><ExternalLink size={12} /> View Proof</a>}
-                          </div>
-                          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                            <button className="btn btn-primary btn-sm" onClick={() => verifyAch(a.id, true)} style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Check size={14} /> Verify</button>
-                            <button className="btn btn-danger btn-sm" onClick={() => verifyAch(a.id, false)} style={{ display: 'flex', alignItems: 'center', gap: 4 }}><X size={14} /> Reject</button>
+                            <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginTop: 4 }}>
+                              <button 
+                                className="btn btn-primary btn-sm" 
+                                onClick={() => verifyAch(a.id, true)} 
+                                disabled={isProcessing}
+                                style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+                              >
+                                <Check size={14} /> {procType === 'approving' ? 'Approving...' : 'Approve'}
+                              </button>
+                              <button 
+                                className="btn btn-danger btn-sm" 
+                                onClick={() => verifyAch(a.id, false)} 
+                                disabled={isProcessing}
+                                style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+                              >
+                                <X size={14} /> {procType === 'rejecting' ? 'Rejecting...' : 'Reject'}
+                              </button>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

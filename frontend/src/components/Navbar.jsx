@@ -23,9 +23,10 @@ export default function Navbar() {
 
   useEffect(() => {
     const updateCount = () => {
+      if (document.hidden) return;
       if (isAdmin) {
-        client.get('/achievements/all/pending')
-          .then(res => setPendingCount(res.data?.length || 0))
+        client.get('/achievements/pending/count')
+          .then(res => setPendingCount(res.data?.count ?? 0))
           .catch(() => setPendingCount(0));
       } else {
         setPendingCount(0);

@@ -12,8 +12,12 @@ function isMissingColumnError(error) {
 const { formatAchievementWithSignedUrl, deleteUploadedFileFromUrl } = require('./uploads');
 
 // Helper to clear relevant caches after achievement updates
-async function clearAchievementCaches() {
-  await cache.flush();
+async function clearAchievementCaches(userId) {
+  if (userId) {
+    await cache.delPrefix(`user:${userId}`);
+  }
+  await cache.delPrefix('leaderboard');
+  await cache.delPrefix('achievements');
 }
 
 // Parse fallback [REJECTED: reason] in description
@@ -44,6 +48,49 @@ function formatAchievement(a) {
     description
   };
 }
+
+// ─── GET /api/achievements/pending/count ─────────────────────────────────────
+router.get('/pending/count', authMiddleware, adminMiddleware, async (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
+  try {
+    const scope = await getAdminScope(req.user.id, req.user.role);
+
+    let { data: pendingRaw, error } = await supabase
+      .from('achievements')
+      .select('id, user_id, description, verified')
+      .eq('verified', false);
+
+    if (error) return res.status(500).json({ error: 'Failed to fetch pending count', count: 0 });
+
+    const pending = (pendingRaw || []).filter(a => a.verified === false && (!a.description || !a.description.trim().toUpperCase().includes('[REJECTED:')));
+
+    if (pending.length === 0) return res.json({ count: 0 });
+
+    if (!scope.hasFullAccess) {
+      const userIds = [...new Set(pending.map(a => a.user_id))];
+      const { data: studentProfiles } = await supabase
+        .from('students')
+        .select('user_id, class, batch')
+        .in('user_id', userIds);
+
+      const profileMap = Object.fromEntries((studentProfiles || []).map(s => [s.user_id, s]));
+
+      const scoped = pending.filter(a => {
+        const p = profileMap[a.user_id];
+        return p && p.class === scope.advisingClass && p.batch === scope.advisingBatch;
+      });
+
+      return res.json({ count: scoped.length });
+    }
+
+    return res.json({ count: pending.length });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error', count: 0 });
+  }
+});
 
 // ─── GET /api/achievements/all/pending ───────────────────────────────────────
 router.get('/all/pending', authMiddleware, adminMiddleware, async (req, res) => {
@@ -178,8 +225,16 @@ router.post('/', authMiddleware, async (req, res) => {
     }
     return res.status(500).json({ error: 'Failed to add achievement' });
   }
-  await clearAchievementCaches();
-  res.status(201).json(await formatAchievementWithSignedUrl(formatAchievement(inserted)));
+  await clearAchievementCaches(req.user.id);
+  const formatted = await formatAchievementWithSignedUrl(formatAchievement(inserted));
+  const canonical = await getStudentCanonicalScore(req.user.id);
+  res.status(201).json({
+    success: true,
+    achievement: formatted,
+    ...formatted,
+    score: canonical.score,
+    achievement_count: canonical.achievement_count
+  });
 });
 
 async function getStudentCanonicalScore(userId) {
@@ -309,8 +364,16 @@ router.patch('/:id/approve', authMiddleware, adminMiddleware, async (req, res) =
   }
 
   if (error || !updatedAch) return res.status(500).json({ error: 'Failed to approve achievement' });
-  await clearAchievementCaches();
-  res.json(formatAchievement(updatedAch));
+  await clearAchievementCaches(ach.user_id);
+  const formatted = formatAchievement(updatedAch);
+  const canonical = await getStudentCanonicalScore(ach.user_id);
+  res.json({
+    success: true,
+    achievement: formatted,
+    ...formatted,
+    score: canonical.score,
+    achievement_count: canonical.achievement_count
+  });
 });
 
 // ─── PATCH /api/achievements/:id/reject ──────────────────────────────────────
@@ -375,8 +438,16 @@ router.patch('/:id/reject', authMiddleware, adminMiddleware, async (req, res) =>
   }
 
   if (error || !updatedAch) return res.status(500).json({ error: 'Failed to reject achievement' });
-  await clearAchievementCaches();
-  res.json(formatAchievement(updatedAch));
+  await clearAchievementCaches(ach.user_id);
+  const formatted = formatAchievement(updatedAch);
+  const canonical = await getStudentCanonicalScore(ach.user_id);
+  res.json({
+    success: true,
+    achievement: formatted,
+    ...formatted,
+    score: canonical.score,
+    achievement_count: canonical.achievement_count
+  });
 });
 
 // ─── PATCH /api/achievements/:id/verify ──────────────────────────────────────
