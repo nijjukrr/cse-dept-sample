@@ -775,8 +775,23 @@ const {
   getAdminAnnouncements,
   createAnnouncement,
   updateAnnouncement,
-  deleteAnnouncement
+  deleteAnnouncement,
+  getAnnouncementStorageStatus
 } = require('../services/announcementStore');
+
+// GET /api/admin/announcements/storage-status - Check if persistent table exists or temporary fallback mode is active
+router.get('/announcements/storage-status', async (req, res) => {
+  try {
+    const status = await getAnnouncementStorageStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({
+      storage_mode: 'temporary',
+      persistent: false,
+      warning: 'Persistent announcement storage is not configured. Posts created in temporary mode may disappear after server restart.'
+    });
+  }
+});
 
 // GET /api/admin/announcements - Fetch all posts (active & inactive)
 router.get('/announcements', async (req, res) => {

@@ -42,6 +42,7 @@ export default function Admin() {
   // Post & Notify state
   const [announcements, setAnnouncements] = useState([]);
   const [annLoading, setAnnLoading] = useState(false);
+  const [storageStatus, setStorageStatus] = useState({ storage_mode: 'persistent', persistent: true, warning: null });
   const [postTitle, setPostTitle] = useState('');
   const [postCategory, setPostCategory] = useState('Hackathon Winner');
   const [postImageUrl, setPostImageUrl] = useState('');
@@ -171,8 +172,12 @@ export default function Admin() {
       setAnnLoading(true);
     }
     try {
-      const res = await client.get('/admin/announcements');
+      const [res, statusRes] = await Promise.all([
+        client.get('/admin/announcements'),
+        client.get('/admin/announcements/storage-status').catch(() => ({ data: { storage_mode: 'persistent', persistent: true, warning: null } }))
+      ]);
       setAnnouncements(res.data);
+      if (statusRes?.data) setStorageStatus(statusRes.data);
       sessionStorage.setItem('admin_announcements', JSON.stringify(res.data));
     } catch {
       showToast('Failed to load announcements.', 'error');
@@ -775,6 +780,22 @@ export default function Admin() {
             {/* ── POST & NOTIFY ── */}
             {tab === 'post-notify' && (
               <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+                {/* Storage Mode Banner */}
+                {storageStatus.persistent ? (
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 18px', borderRadius: 'var(--radius-md)', background: 'var(--green-50)', border: '1px solid var(--border)', color: 'var(--color-green)', fontSize: 13, fontWeight: 700 }}>
+                    <span>🟢 Persistent Storage Active</span>
+                  </div>
+                ) : (
+                  <div style={{ padding: '16px 20px', borderRadius: 'var(--radius-md)', background: '#FEFCE8', border: '1.5px solid #FDE047', color: '#854D0E', fontSize: 13, lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>🟡 Temporary Storage Mode</span>
+                    </div>
+                    <div>
+                      Announcements may disappear after server restart. Database migration required for permanent storage.
+                    </div>
+                  </div>
+                )}
 
                 {/* Neat Publishing Form */}
                 <div className="card" style={{ padding: '28px', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-sm)' }}>

@@ -141,10 +141,48 @@ async function deleteAnnouncement(id) {
   }
 }
 
+async function getAnnouncementStorageStatus() {
+  try {
+    const { error } = await supabase
+      .from('announcements')
+      .select('id')
+      .limit(1);
+
+    if (error && (error.code === '42P01' || error.code === 'PGRST204' || (error.message && error.message.includes('Could not find')))) {
+      return {
+        storage_mode: 'temporary',
+        persistent: false,
+        warning: 'Persistent announcement storage is not configured. Posts created in temporary mode may disappear after server restart. Ask database owner to apply create_announcements.sql migration.'
+      };
+    }
+
+    if (error) {
+      return {
+        storage_mode: 'temporary',
+        persistent: false,
+        warning: `Persistent announcement storage check warning: ${error.message}`
+      };
+    }
+
+    return {
+      storage_mode: 'persistent',
+      persistent: true,
+      warning: null
+    };
+  } catch (err) {
+    return {
+      storage_mode: 'temporary',
+      persistent: false,
+      warning: 'Persistent announcement storage is not configured. Posts created in temporary mode may disappear after server restart.'
+    };
+  }
+}
+
 module.exports = {
   getAdminAnnouncements,
   getActiveAnnouncements,
   createAnnouncement,
   updateAnnouncement,
-  deleteAnnouncement
+  deleteAnnouncement,
+  getAnnouncementStorageStatus
 };
