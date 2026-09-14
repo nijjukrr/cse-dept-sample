@@ -30,7 +30,7 @@ const DURATION_LABEL = {
 };
 
 export default function Approvals() {
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   const [achievements, setAchievements] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -74,7 +74,7 @@ export default function Approvals() {
     };
   }, []);
 
-  if (!user?.is_admin) {
+  if (!isAdmin) {
     return <Navigate to="/" replace />;
   }
 

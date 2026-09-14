@@ -24,6 +24,9 @@ async function buildLeaderboardFromAchievements(batchFilter, classFilter, limit)
 
   const achMap = new Map();
   for (const achievement of achievements || []) {
+    if (achievement.description && achievement.description.trim().toUpperCase().includes('[REJECTED:')) {
+      continue;
+    }
     const current = achMap.get(achievement.user_id) || {
       score: 0,
       count: 0,

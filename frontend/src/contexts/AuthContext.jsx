@@ -56,8 +56,17 @@ export function AuthProvider({ children }) {
     };
   }, [user?.id]);
 
+  const isAdmin = Boolean(
+    user &&
+    (
+      user.is_admin ||
+      user.role === 'admin' ||
+      user.role === 'faculty'
+    )
+  );
+
   return (
-    <AuthContext.Provider value={{ user, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, isAdmin, login, register, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

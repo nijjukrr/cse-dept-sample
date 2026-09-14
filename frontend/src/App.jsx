@@ -38,15 +38,16 @@ if (typeof window !== 'undefined') {
 }
 
 function ProtectedRoute({ children, adminOnly = false }) {
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
+  if (adminOnly && !isAdmin) return <Navigate to="/" replace />;
   return children;
 }
 
 function StudentOnlyRoute({ children }) {
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
-  if (user.is_admin || (user.role && user.role !== 'student')) return <Navigate to="/" replace />;
+  if (isAdmin) return <Navigate to="/" replace />;
   return children;
 }
 

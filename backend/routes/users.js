@@ -36,7 +36,7 @@ router.get('/', withHttpCache('users:list', 300), async (req, res) => {
     profilesQuery,
     supabase
       .from('achievements')
-      .select('user_id, points')
+      .select('user_id, points, description')
       .eq('verified', true)
   ]);
 
@@ -52,6 +52,9 @@ router.get('/', withHttpCache('users:list', 300), async (req, res) => {
   // Group achievements by user_id for O(1) lookup
   const achMap = {};
   for (const a of achs) {
+    if (a.description && a.description.trim().toUpperCase().includes('[REJECTED:')) {
+      continue;
+    }
     if (!achMap[a.user_id]) achMap[a.user_id] = { score: 0, count: 0 };
     achMap[a.user_id].score += a.points || 0;
     achMap[a.user_id].count++;

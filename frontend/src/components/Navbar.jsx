@@ -6,7 +6,7 @@ import { Home, Trophy, GraduationCap, Users, Shield, CheckCircle, Zap } from 'lu
 import './Navbar.css';
 
 export default function Navbar() {
-  const { user, logout } = useAuth();
+  const { user, isAdmin, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -23,7 +23,7 @@ export default function Navbar() {
 
   useEffect(() => {
     const updateCount = () => {
-      if (user?.is_admin) {
+      if (isAdmin) {
         client.get('/achievements/all/pending')
           .then(res => setPendingCount(res.data?.length || 0))
           .catch(() => setPendingCount(0));
@@ -44,7 +44,7 @@ export default function Navbar() {
       window.removeEventListener('scoreUpdated', updateCount);
       window.removeEventListener('focus', updateCount);
     };
-  }, [user, location.pathname]);
+  }, [user, isAdmin, location.pathname]);
 
   const isActive = (path) => location.pathname === path || location.pathname.startsWith(path + '/');
 
@@ -80,7 +80,7 @@ export default function Navbar() {
             // Hide everything except Home if not logged in
             if (!user && link.to !== '/') return null;
             // Hide student-only links from non-student accounts (Faculty / Admin)
-            if (link.studentOnly && (user?.is_admin || (user?.role && user?.role !== 'student'))) return null;
+            if (link.studentOnly && isAdmin) return null;
             return (
               <Link
                 key={link.to}
@@ -94,7 +94,7 @@ export default function Navbar() {
             );
           })}
 
-          {user?.is_admin && (
+          {isAdmin && (
             <Link to="/admin" className={`nav-link ${isActive('/admin') ? 'active' : ''}`} onClick={() => setMenuOpen(false)}>
               <span className="nav-icon"><Shield size={18} /></span> Admin
               {pendingCount > 0 && <span className="nav-pending-badge">{pendingCount}</span>}

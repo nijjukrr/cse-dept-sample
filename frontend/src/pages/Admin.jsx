@@ -20,7 +20,7 @@ const CLASSES = ['CSE-A', 'CSE-B', 'CSE-C', 'CSE-D', 'CSE-E'];
 const CATEGORIES = ['Important', 'Hackathon Winner', 'Placement', 'Department Update', 'Event', 'Achievement', 'General'];
 
 export default function Admin() {
-  const { user, refreshUser } = useAuth();
+  const { user, isAdmin, refreshUser } = useAuth();
   const location = useLocation();
   const [students, setStudents] = useState([]);
   const [achievements, setAchievements] = useState([]);
@@ -277,7 +277,7 @@ export default function Admin() {
     );
   }
 
-  if (!user.is_admin) {
+  if (!isAdmin) {
     return (
       <div className="page-content">
         <div className="container" style={{ padding: '60px 20px' }}>
