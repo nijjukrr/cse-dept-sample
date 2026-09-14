@@ -27,6 +27,12 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     localStorage.removeItem('SIET_token');
     localStorage.removeItem('SIET_user');
+    try {
+      sessionStorage.removeItem('admin_overview_students');
+      sessionStorage.removeItem('admin_managed_students');
+      sessionStorage.removeItem('admin_faculties');
+      sessionStorage.removeItem('admin_announcements');
+    } catch {}
     setUser(null);
   }, []);
 
