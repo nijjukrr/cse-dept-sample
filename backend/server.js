@@ -29,6 +29,7 @@ app.use('/api/teams', require('./routes/teams'));
 app.use('/api/updates', require('./routes/updates'));
 app.use('/api/announcements', require('./routes/announcements'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/uploads', require('./routes/uploads'));
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'SIET CSE Portal API is running 🚀', timestamp: new Date().toISOString() });

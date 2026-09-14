@@ -170,7 +170,15 @@ router.post('/', authMiddleware, async (req, res) => {
     error = fallbackRes.error;
   }
 
-  if (error || !inserted) return res.status(500).json({ error: 'Failed to add achievement' });
+  if (error || !inserted) {
+    if (proof_url) {
+      try {
+        const { deleteUploadedFileFromUrl } = require('./uploads');
+        deleteUploadedFileFromUrl('achievement-proofs', proof_url).catch(() => {});
+      } catch (e) {}
+    }
+    return res.status(500).json({ error: 'Failed to add achievement' });
+  }
   await clearAchievementCaches();
   res.status(201).json(formatAchievement(inserted));
 });

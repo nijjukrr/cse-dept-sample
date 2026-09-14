@@ -42,10 +42,13 @@ export default function Admin() {
   // Post & Notify state
   const [announcements, setAnnouncements] = useState([]);
   const [annLoading, setAnnLoading] = useState(false);
-  const [storageStatus, setStorageStatus] = useState({ storage_mode: 'persistent', persistent: true, warning: null });
   const [postTitle, setPostTitle] = useState('');
   const [postCategory, setPostCategory] = useState('Hackathon Winner');
   const [postImageUrl, setPostImageUrl] = useState('');
+  const [postFile, setPostFile] = useState(null);
+  const [postFilePreview, setPostFilePreview] = useState(null);
+  const [postUploadMode, setPostUploadMode] = useState('file'); // 'file' | 'url'
+  const [postFileError, setPostFileError] = useState(null);
   const [postContent, setPostContent] = useState('');
   const [postIsActive, setPostIsActive] = useState(true);
   const [publishing, setPublishing] = useState(false);
@@ -172,15 +175,11 @@ export default function Admin() {
       setAnnLoading(true);
     }
     try {
-      const [res, statusRes] = await Promise.all([
-        client.get('/admin/announcements'),
-        client.get('/admin/announcements/storage-status').catch(() => ({ data: { storage_mode: 'persistent', persistent: true, warning: null } }))
-      ]);
+      const res = await client.get('/admin/announcements');
       setAnnouncements(res.data);
-      if (statusRes?.data) setStorageStatus(statusRes.data);
       sessionStorage.setItem('admin_announcements', JSON.stringify(res.data));
-    } catch {
-      showToast('Failed to load announcements.', 'error');
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Failed to load announcements.', 'error');
     } finally {
       setAnnLoading(false);
     }
@@ -192,6 +191,45 @@ export default function Admin() {
     if (tab === 'post-notify') loadAnnouncements();
   }, [tab, loadManagedStudents, loadFaculties, loadAnnouncements]);
 
+  const handlePostFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPostFileError(null);
+
+    // Validate size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      setPostFileError('File size exceeds maximum limit of 5MB.');
+      setPostFile(null);
+      setPostFilePreview(null);
+      return;
+    }
+
+    // Validate MIME / extension (Images only! No PDFs)
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+    const allowedExts = ['.jpg', '.jpeg', '.png', '.webp'];
+
+    if (!allowedTypes.includes((file.type || '').toLowerCase()) && !allowedExts.includes(ext)) {
+      setPostFileError('Invalid file type. Supported image formats: JPG, PNG, WEBP.');
+      setPostFile(null);
+      setPostFilePreview(null);
+      return;
+    }
+
+    setPostFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setPostFilePreview(reader.result);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removePostFile = () => {
+    setPostFile(null);
+    setPostFilePreview(null);
+    setPostFileError(null);
+  };
+
   const handleSaveAnnouncement = async (e) => {
     e.preventDefault();
     if (!postTitle.trim() || !postContent.trim()) {
@@ -199,31 +237,69 @@ export default function Admin() {
       return;
     }
     setPublishing(true);
+    setPostFileError(null);
+
     try {
+      let finalImageUrl = postImageUrl;
+
+      if (postUploadMode === 'file' && postFile) {
+        const formData = new FormData();
+        formData.append('file', postFile);
+
+        try {
+          const uploadRes = await client.post('/uploads/announcement-image', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+          if (uploadRes.data?.url) {
+            finalImageUrl = uploadRes.data.url;
+          }
+        } catch (uploadErr) {
+          const errMsg = uploadErr.response?.data?.error || 'File upload is not configured yet. You can paste a public URL instead.';
+          setPostFileError(errMsg);
+          if (uploadErr.response?.data?.storage_available === false) {
+            setPostUploadMode('url');
+          }
+          showToast(errMsg, 'error');
+          setPublishing(false);
+          return;
+        }
+      }
+
       const payload = {
         title: postTitle,
         category: postCategory,
-        image_url: postImageUrl,
+        image_url: finalImageUrl,
         content: postContent,
         is_active: postIsActive
       };
       if (editingAnnId) {
         const res = await client.patch(`/admin/announcements/${editingAnnId}`, payload);
-        setAnnouncements(prev => prev.map(a => a.id === editingAnnId ? res.data : a));
+        setAnnouncements(prev => {
+          const updated = prev.map(a => a.id === editingAnnId ? res.data : a);
+          sessionStorage.setItem('admin_announcements', JSON.stringify(updated));
+          return updated;
+        });
         showToast('Post updated successfully! 🚀');
       } else {
         const res = await client.post('/admin/announcements', payload);
-        setAnnouncements(prev => [res.data, ...prev]);
+        setAnnouncements(prev => {
+          const updated = [res.data, ...prev];
+          sessionStorage.setItem('admin_announcements', JSON.stringify(updated));
+          return updated;
+        });
         showToast('Post published successfully! 📢');
       }
       setPostTitle('');
       setPostCategory('Hackathon Winner');
       setPostImageUrl('');
+      setPostFile(null);
+      setPostFilePreview(null);
+      setPostFileError(null);
       setPostContent('');
       setPostIsActive(true);
       setEditingAnnId(null);
-    } catch {
-      showToast('Failed to publish post.', 'error');
+    } catch (err) {
+      showToast(err.response?.data?.error || (editingAnnId ? 'Failed to update announcement.' : 'Failed to publish announcement. Please try again.'), 'error');
     } finally {
       setPublishing(false);
     }
@@ -234,6 +310,9 @@ export default function Admin() {
     setPostTitle(ann.title);
     setPostCategory(ann.category || 'General');
     setPostImageUrl(ann.image_url || '');
+    setPostFile(null);
+    setPostFilePreview(null);
+    setPostFileError(null);
     setPostContent(ann.content);
     setPostIsActive(ann.is_active);
     window.scrollTo({ top: 180, behavior: 'smooth' });
@@ -243,10 +322,14 @@ export default function Admin() {
     try {
       const updated = !ann.is_active;
       const res = await client.patch(`/admin/announcements/${ann.id}`, { is_active: updated });
-      setAnnouncements(prev => prev.map(a => a.id === ann.id ? res.data : a));
+      setAnnouncements(prev => {
+        const updatedList = prev.map(a => a.id === ann.id ? res.data : a);
+        sessionStorage.setItem('admin_announcements', JSON.stringify(updatedList));
+        return updatedList;
+      });
       showToast(`Post status updated to ${updated ? 'Active' : 'Hidden'}!`);
-    } catch {
-      showToast('Failed to update status.', 'error');
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Failed to update status.', 'error');
     }
   };
 
@@ -260,10 +343,14 @@ export default function Admin() {
     if (!annToDelete) return;
     try {
       await client.delete(`/admin/announcements/${annToDelete}`);
-      setAnnouncements(prev => prev.filter(a => a.id !== annToDelete));
+      setAnnouncements(prev => {
+        const filtered = prev.filter(a => a.id !== annToDelete);
+        sessionStorage.setItem('admin_announcements', JSON.stringify(filtered));
+        return filtered;
+      });
       showToast('Announcement deleted.');
-    } catch {
-      showToast('Failed to delete announcement.', 'error');
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Failed to delete announcement.', 'error');
     } finally {
       setAnnToDelete(null);
     }
@@ -781,22 +868,6 @@ export default function Admin() {
             {tab === 'post-notify' && (
               <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
-                {/* Storage Mode Banner */}
-                {storageStatus.persistent ? (
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 18px', borderRadius: 'var(--radius-md)', background: 'var(--green-50)', border: '1px solid var(--border)', color: 'var(--color-green)', fontSize: 13, fontWeight: 700 }}>
-                    <span>🟢 Persistent Storage Active</span>
-                  </div>
-                ) : (
-                  <div style={{ padding: '16px 20px', borderRadius: 'var(--radius-md)', background: '#FEFCE8', border: '1.5px solid #FDE047', color: '#854D0E', fontSize: 13, lineHeight: 1.5 }}>
-                    <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span>🟡 Temporary Storage Mode</span>
-                    </div>
-                    <div>
-                      Announcements may disappear after server restart. Database migration required for permanent storage.
-                    </div>
-                  </div>
-                )}
-
                 {/* Neat Publishing Form */}
                 <div className="card" style={{ padding: '28px', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-sm)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, paddingBottom: 16, borderBottom: '1px solid var(--border)' }}>
@@ -814,6 +885,9 @@ export default function Admin() {
                         setPostTitle('');
                         setPostCategory('Hackathon Winner');
                         setPostImageUrl('');
+                        setPostFile(null);
+                        setPostFilePreview(null);
+                        setPostFileError(null);
                         setPostContent('');
                         setPostIsActive(true);
                       }}>
@@ -877,24 +951,111 @@ export default function Admin() {
                       />
                     </div>
 
-                    {/* Image URL & Live Preview */}
+                    {/* Post Image Upload / URL & Live Preview */}
                     <div>
-                      <label className="form-label" style={{ fontSize: 13, fontWeight: 700, marginBottom: 6, display: 'block' }}>
-                        Image URL <span style={{ fontWeight: 400, color: 'var(--color-text-muted)' }}>(Winner poster, event photo or banner)</span>
+                      <label className="form-label" style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, display: 'block' }}>
+                        Post Image <span style={{ fontWeight: 400, color: 'var(--color-text-muted)' }}>(Winner poster, event photo or banner)</span>
                       </label>
-                      <input
-                        type="url"
-                        className="input"
-                        placeholder="https://images.unsplash.com/photo-1531482615713-2afd69097998?w=800"
-                        value={postImageUrl}
-                        onChange={e => setPostImageUrl(e.target.value)}
-                        style={{ fontSize: 14, padding: '10px 14px' }}
-                      />
+                      
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                        <button
+                          type="button"
+                          className={`btn btn-sm ${postUploadMode === 'file' ? 'btn-primary' : 'btn-secondary'}`}
+                          onClick={() => setPostUploadMode('file')}
+                        >
+                          Choose Image
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn btn-sm ${postUploadMode === 'url' ? 'btn-primary' : 'btn-secondary'}`}
+                          onClick={() => setPostUploadMode('url')}
+                        >
+                          Paste Image URL
+                        </button>
+                      </div>
 
-                      {postImageUrl ? (
+                      {postUploadMode === 'file' ? (
+                        <div>
+                          {!postFile ? (
+                            <label style={{
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: '18px',
+                              border: '2px dashed var(--border)',
+                              borderRadius: 'var(--radius-md)',
+                              cursor: 'pointer',
+                              background: 'var(--color-bg-alt, #f8fafc)',
+                              transition: 'all 0.2s'
+                            }}>
+                              <Image size={24} style={{ marginBottom: 6, color: 'var(--color-text-muted)' }} />
+                              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>Click to Choose Image File</span>
+                              <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                                Supported: JPG, PNG, WEBP (Max 5MB)
+                              </span>
+                              <input
+                                type="file"
+                                accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                                onChange={handlePostFileChange}
+                                style={{ display: 'none' }}
+                              />
+                            </label>
+                          ) : (
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justify: 'space-between',
+                              padding: '10px 14px',
+                              background: 'var(--color-bg-alt, #f8fafc)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 'var(--radius-md)'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 12, overflow: 'hidden' }}>
+                                {postFilePreview && (
+                                  <img src={postFilePreview} alt="Preview" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border)' }} />
+                                )}
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ fontSize: 13, fontWeight: 600, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                                    Selected: {postFile.name}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                    {(postFile.size / (1024 * 1024)).toFixed(2)} MB
+                                  </div>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                onClick={removePostFile}
+                                style={{ color: '#ef4444', padding: '4px 8px' }}
+                              >
+                                Remove image
+                              </button>
+                            </div>
+                          )}
+
+                          {postFileError && (
+                            <div style={{ marginTop: 8, fontSize: 12, color: '#dc2626', fontWeight: 500 }}>
+                              {postFileError}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <input
+                          type="url"
+                          className="input"
+                          placeholder="https://images.unsplash.com/photo-1531482615713-2afd69097998?w=800"
+                          value={postImageUrl}
+                          onChange={e => setPostImageUrl(e.target.value)}
+                          style={{ fontSize: 14, padding: '10px 14px' }}
+                        />
+                      )}
+
+                      {(postImageUrl || postFilePreview) ? (
                         <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 16, background: 'var(--bg-hover)', padding: 12, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
                           <img
-                            src={postImageUrl}
+                            src={postFilePreview || postImageUrl}
                             alt="Live Preview"
                             style={{ width: 100, height: 65, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--border)' }}
                             onError={(e) => { e.target.style.display = 'none'; }}

@@ -828,7 +828,13 @@ router.post('/announcements', async (req, res) => {
     res.status(201).json(data);
   } catch (err) {
     console.error('Create announcement exception:', err);
-    res.status(500).json({ error: 'Failed to create announcement' });
+    if (req.body.image_url) {
+      try {
+        const { deleteUploadedFileFromUrl } = require('./uploads');
+        deleteUploadedFileFromUrl('department-posts', req.body.image_url).catch(() => {});
+      } catch (e) {}
+    }
+    res.status(500).json({ error: 'Unable to publish announcement right now. Please try again.' });
   }
 });
 
@@ -850,7 +856,7 @@ router.patch('/announcements/:id', async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error('Update announcement exception:', err);
-    res.status(500).json({ error: 'Failed to update announcement' });
+    res.status(500).json({ error: 'Unable to update announcement right now. Please try again.' });
   }
 });
 
@@ -862,7 +868,7 @@ router.delete('/announcements/:id', async (req, res) => {
     res.json({ message: 'Announcement deleted successfully' });
   } catch (err) {
     console.error('Delete announcement exception:', err);
-    res.status(500).json({ error: 'Failed to delete announcement' });
+    res.status(500).json({ error: 'Unable to delete announcement right now. Please try again.' });
   }
 });
 

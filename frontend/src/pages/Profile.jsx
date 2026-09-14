@@ -8,7 +8,7 @@ import CustomSelect from '../components/CustomSelect';
 import TruncatedText from '../components/TruncatedText';
 import { 
   Shield, Book, GraduationCap, Terminal, Briefcase, AtSign, 
-  Camera, Globe, Phone, Plus, Cake, Edit3, Award, Lightbulb, Hourglass 
+  Camera, Globe, Phone, Plus, Cake, Edit3, Award, Lightbulb, Hourglass, Upload, FileText, X
 } from 'lucide-react';
 
 const ACH_TYPES = ['hackathon', 'internship', 'course', 'project', 'certification'];
@@ -25,6 +25,10 @@ export default function Profile() {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [form, setForm] = useState({ type: 'hackathon', title: '', description: '', position: '', duration: '', proof_url: '' });
+  const [selectedProofFile, setSelectedProofFile] = useState(null);
+  const [proofUploadMode, setProofUploadMode] = useState('file'); // 'file' | 'url'
+  const [proofFileError, setProofFileError] = useState(null);
+  const [submittingAch, setSubmittingAch] = useState(false);
   const [toast, setToast] = useState(null);
   const isOwn = authUser?.id === id;
 
@@ -81,19 +85,79 @@ export default function Profile() {
     };
   }, [id]);
 
+  const handleProofFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setProofFileError(null);
+
+    // Validate size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      setProofFileError('File size exceeds maximum limit of 5MB.');
+      setSelectedProofFile(null);
+      return;
+    }
+
+    // Validate MIME / extension
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
+    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+    const allowedExts = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+
+    if (!allowedTypes.includes((file.type || '').toLowerCase()) && !allowedExts.includes(ext)) {
+      setProofFileError('Invalid file type. Supported formats: JPG, PNG, WEBP, PDF.');
+      setSelectedProofFile(null);
+      return;
+    }
+
+    setSelectedProofFile(file);
+  };
+
   const addAchievement = async (e) => {
     e.preventDefault();
+    setSubmittingAch(true);
+    setProofFileError(null);
+
     try {
-      const { data } = await client.post('/achievements', form);
+      let finalProofUrl = form.proof_url;
+
+      if (proofUploadMode === 'file' && selectedProofFile) {
+        const formData = new FormData();
+        formData.append('file', selectedProofFile);
+
+        try {
+          const uploadRes = await client.post('/uploads/achievement-proof', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+          if (uploadRes.data?.url) {
+            finalProofUrl = uploadRes.data.url;
+          }
+        } catch (uploadErr) {
+          const errMsg = uploadErr.response?.data?.error || 'File upload is not configured yet. You can paste a public URL instead.';
+          setProofFileError(errMsg);
+          if (uploadErr.response?.data?.storage_available === false) {
+            setProofUploadMode('url');
+          }
+          showToast(errMsg, 'error');
+          setSubmittingAch(false);
+          return;
+        }
+      }
+
+      const payload = { ...form, proof_url: finalProofUrl };
+      const { data } = await client.post('/achievements', payload);
       setAchievements(prev => [data, ...prev]);
       setShowAddModal(false);
       setForm({ type: 'hackathon', title: '', description: '', position: '', duration: '', proof_url: '' });
+      setSelectedProofFile(null);
+      setProofFileError(null);
+      setProofUploadMode('file');
       showToast(<span>Achievement submitted for Admin Approval! <Hourglass size={14} style={{ display: 'inline', verticalAlign: 'middle' }} /></span>);
       window.dispatchEvent(new Event('pendingUpdated'));
       window.dispatchEvent(new Event('scoreUpdated'));
       if (isOwn) refreshUser();
     } catch (err) {
       showToast(err.response?.data?.error || 'Failed to add achievement', 'error');
+    } finally {
+      setSubmittingAch(false);
     }
   };
 
@@ -434,11 +498,106 @@ export default function Profile() {
               )}
 
               <div className="form-group">
-                <label className="form-label">Verification Document / Certificate URL</label>
-                <input className="form-input" type="url" value={form.proof_url} onChange={e => setForm(f => ({ ...f, proof_url: e.target.value }))} placeholder="https://drive.google.com/... or certificate link" />
-                <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
-                  Provide a Google Drive, certificate link, or verification URL for the admin to inspect before approving.
-                </span>
+                <label className="form-label" style={{ fontWeight: 700, marginBottom: 6, display: 'block' }}>
+                  Certificate / Proof
+                </label>
+                
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${proofUploadMode === 'file' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setProofUploadMode('file')}
+                  >
+                    Choose File
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${proofUploadMode === 'url' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setProofUploadMode('url')}
+                  >
+                    Paste Certificate URL
+                  </button>
+                </div>
+
+                {proofUploadMode === 'file' ? (
+                  <div>
+                    {!selectedProofFile ? (
+                      <label style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '18px',
+                        border: '2px dashed var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                        cursor: 'pointer',
+                        background: 'var(--color-bg-alt, #f8fafc)',
+                        transition: 'all 0.2s'
+                      }}>
+                        <Upload size={22} style={{ marginBottom: 6, color: 'var(--color-text-muted)' }} />
+                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>Click to Choose Certificate / Proof</span>
+                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                          Supported: JPG, PNG, WEBP, PDF (Max 5MB)
+                        </span>
+                        <input
+                          type="file"
+                          accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf"
+                          onChange={handleProofFileChange}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                    ) : (
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justify: 'space-between',
+                        padding: '10px 14px',
+                        background: 'var(--color-bg-alt, #f8fafc)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, overflow: 'hidden' }}>
+                          <FileText size={20} color="var(--color-green)" />
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                              Selected: {selectedProofFile.name}
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                              {(selectedProofFile.size / (1024 * 1024)).toFixed(2)} MB
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setSelectedProofFile(null)}
+                          style={{ color: '#ef4444', padding: '4px 8px' }}
+                        >
+                          Remove file
+                        </button>
+                      </div>
+                    )}
+
+                    {proofFileError && (
+                      <div style={{ marginTop: 8, fontSize: 12, color: '#dc2626', fontWeight: 500 }}>
+                        {proofFileError}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div>
+                    <input
+                      className="form-input"
+                      type="url"
+                      value={form.proof_url}
+                      onChange={e => setForm(f => ({ ...f, proof_url: e.target.value }))}
+                      placeholder="https://drive.google.com/... or certificate link"
+                    />
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
+                      Provide a Google Drive, certificate link, or verification URL for the admin to inspect before approving.
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="alert alert-info" style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
@@ -452,7 +611,9 @@ export default function Profile() {
 
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
                 <button type="button" className="btn btn-secondary" onClick={() => setShowAddModal(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary">Add Achievement</button>
+                <button type="submit" className="btn btn-primary" disabled={submittingAch}>
+                  {submittingAch ? 'Submitting...' : 'Add Achievement'}
+                </button>
               </div>
             </form>
           </div>

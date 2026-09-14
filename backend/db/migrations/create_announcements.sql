@@ -17,14 +17,6 @@ CREATE TABLE IF NOT EXISTS public.announcements (
 
 CREATE INDEX IF NOT EXISTS idx_announcements_active ON public.announcements(is_active);
 
--- Enable RLS and add Service role policy for announcements
+-- Enable RLS (Service role automatically bypasses RLS in Supabase)
 ALTER TABLE public.announcements ENABLE ROW LEVEL SECURITY;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies WHERE tablename = 'announcements' AND policyname = 'Service role full access on announcements'
-  ) THEN
-    CREATE POLICY "Service role full access on announcements" ON public.announcements FOR ALL USING (true) WITH CHECK (true);
-  END IF;
-END $$;
