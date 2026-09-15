@@ -1,9 +1,24 @@
+/**
+ * SSIET CSE Department - Competitive Leaderboard API
+ * 
+ * Features:
+ * - Authoritative, normalized department scoring
+ * - Category-aware filtering: Problem Solving, Competitive Programming, Open Source, Certifications, Department Wins
+ * - Deterministic tie-breaking hierarchy
+ * - Transparent & explainable score breakdown endpoint: /api/leaderboard/breakdown/:userId
+ * - Freshness metadata
+ */
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../db/supabase');
-const { withHttpCache } = require('../services/httpCache');
+const { platformStore } = require('../services/platformStore');
+const { scoringEngine } = require('../services/scoringEngine');
+const { normalizationEngine } = require('../services/normalizationEngine');
+const { SCORING_CONFIG } = require('../config/scoringConfig');
 
-async function buildLeaderboardFromAchievements(batchFilter, classFilter, limit) {
+async function buildUnifiedLeaderboard({ batchFilter, classFilter, category = 'overall', limit = 100, search = '' }) {
+  // 1. Fetch students
   let query = supabase
     .from('students')
     .select('user_id, name, roll_no, reg_no, class, batch, year, github, linkedin, avatar_url');
@@ -11,85 +26,180 @@ async function buildLeaderboardFromAchievements(batchFilter, classFilter, limit)
   if (batchFilter && batchFilter !== 'all') query = query.eq('batch', batchFilter);
   if (classFilter && classFilter !== 'all') query = query.eq('class', classFilter);
 
-  const { data: students, error } = await query;
-  if (error || !students?.length) {
-    if (error) console.error('Leaderboard fallback student query error:', error);
+  const { data: students, error: sErr } = await query;
+  if (sErr || !students?.length) {
+    if (sErr) console.error('[Leaderboard] Student query error:', sErr);
     return [];
   }
 
+  // 2. Fetch all verified department achievements
   const { data: achievements } = await supabase
     .from('achievements')
-    .select('user_id, points, type, title, position, verified, description')
+    .select('user_id, points, type, title, position, verified, status, description')
     .eq('verified', true);
 
   const achMap = new Map();
-  for (const achievement of achievements || []) {
-    if (achievement.description && achievement.description.trim().toUpperCase().includes('[REJECTED:')) {
-      continue;
-    }
-    const current = achMap.get(achievement.user_id) || {
-      score: 0,
-      count: 0,
-      gold: 0,
-      silver: 0,
-      bronze: 0,
-      topTitle: null,
-      topScore: 0,
-    };
-
-    current.score += achievement.points || 0;
-    current.count += 1;
-
-    if (achievement.type === 'hackathon') {
-      if (achievement.position === '1st') current.gold += 1;
-      else if (achievement.position === '2nd') current.silver += 1;
-      else if (achievement.position === '3rd') current.bronze += 1;
-    }
-
-    const points = achievement.points || 0;
-    if (points > current.topScore || (!current.topTitle && achievement.title)) {
-      current.topTitle = achievement.title || null;
-      current.topScore = points;
-    }
-
-    achMap.set(achievement.user_id, current);
+  for (const a of achievements || []) {
+    if (a.description && a.description.trim().toUpperCase().includes('[REJECTED:')) continue;
+    const current = achMap.get(a.user_id) || [];
+    current.push(a);
+    achMap.set(a.user_id, current);
   }
 
-  return students
-    .map((u) => {
-      const stats = achMap.get(u.user_id) || { score: 0, count: 0, gold: 0, silver: 0, bronze: 0, topTitle: null };
-      return {
-        id: u.user_id,
-        name: u.name,
-        roll_no: u.roll_no,
-        reg_no: u.reg_no,
-        class: u.class,
-        batch: u.batch,
-        year: u.year,
-        github: u.github,
-        linkedin: u.linkedin,
-        avatar_url: u.avatar_url,
-        score: stats.score || 0,
-        achievement_count: stats.count || 0,
-        gold_wins: stats.gold || 0,
-        silver_wins: stats.silver || 0,
-        bronze_wins: stats.bronze || 0,
-        top_achievement: stats.topTitle || null,
-      };
-    })
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      if ((b.achievement_count || 0) !== (a.achievement_count || 0)) return (b.achievement_count || 0) - (a.achievement_count || 0);
-      if ((b.gold_wins || 0) !== (a.gold_wins || 0)) return (b.gold_wins || 0) - (a.gold_wins || 0);
-      return (a.name || '').localeCompare(b.name || '');
-    })
-    .slice(0, limit || 100)
-    .map((u, i) => ({ ...u, rank: i + 1 }));
+  // 3. Fetch all competitive profiles & platform connections
+  const [storedProfiles, allConnections] = await Promise.all([
+    platformStore.getAllCompetitiveProfiles(),
+    platformStore.getAllStudentConnections(),
+  ]);
+
+  const profileMap = new Map((storedProfiles || []).map((p) => [p.user_id, p]));
+  const connMap = new Map();
+  for (const c of allConnections || []) {
+    const list = connMap.get(c.user_id) || [];
+    list.push(c);
+    connMap.set(c.user_id, list);
+  }
+
+  // 4. Compute / assemble entry for each student
+  const leaderboardEntries = students.map((s) => {
+    const userAchs = achMap.get(s.user_id) || [];
+    const userConns = connMap.get(s.user_id) || [];
+    let compProfile = profileMap.get(s.user_id);
+
+    // If profile not yet calculated or needs refresh, calculate dynamically
+    if (!compProfile) {
+      compProfile = scoringEngine.calculateStudentScore(s, userConns, userAchs);
+    }
+
+    const goldWins = userAchs.filter((a) => a.type === 'hackathon' && a.position === '1st').length;
+    const silverWins = userAchs.filter((a) => a.type === 'hackathon' && a.position === '2nd').length;
+    const bronzeWins = userAchs.filter((a) => a.type === 'hackathon' && a.position === '3rd').length;
+
+    // Platform badges summary
+    const connectedPlatforms = userConns
+      .filter((c) => c.connection_status !== 'disconnected')
+      .map((c) => ({
+        code: c.platform_code,
+        username: c.username,
+        score: c.platform_score || 0,
+        sync_status: c.sync_status || 'never_synced',
+        last_synced_at: c.last_synced_at,
+        freshness: normalizationEngine.getFreshnessStatus(c.last_synced_at),
+      }));
+
+    return {
+      id: s.user_id,
+      name: s.name,
+      roll_no: s.roll_no,
+      reg_no: s.reg_no,
+      class: s.class,
+      batch: s.batch,
+      year: s.year,
+      github: s.github,
+      linkedin: s.linkedin,
+      avatar_url: s.avatar_url,
+      // Canonical scores
+      overall_score: compProfile.overall_score || 0,
+      score: compProfile.overall_score || 0, // backward compat with existing components
+      problem_solving_score: compProfile.problem_solving_score || 0,
+      competitive_programming_score: compProfile.competitive_programming_score || 0,
+      open_source_score: compProfile.open_source_score || 0,
+      certifications_score: compProfile.certifications_score || 0,
+      college_achievements_score: compProfile.college_achievements_score || 0,
+      // Metadata
+      achievement_count: userAchs.length,
+      gold_wins: goldWins,
+      silver_wins: silverWins,
+      bronze_wins: bronzeWins,
+      connected_platforms: connectedPlatforms,
+      connected_platform_count: connectedPlatforms.length,
+      last_calculated_at: compProfile.last_calculated_at || new Date().toISOString(),
+    };
+  });
+
+  // 5. Search filter
+  let filtered = leaderboardEntries;
+  if (search && search.trim()) {
+    const q = search.trim().toLowerCase();
+    filtered = filtered.filter(
+      (s) => s.name.toLowerCase().includes(q) || s.roll_no.toLowerCase().includes(q)
+    );
+  }
+
+  // 6. Sort deterministically based on requested category
+  filtered.sort((a, b) => {
+    if (category === 'problem_solving') {
+      if (b.problem_solving_score !== a.problem_solving_score) return b.problem_solving_score - a.problem_solving_score;
+    } else if (category === 'competitive_programming') {
+      if (b.competitive_programming_score !== a.competitive_programming_score) return b.competitive_programming_score - a.competitive_programming_score;
+    } else if (category === 'open_source') {
+      if (b.open_source_score !== a.open_source_score) return b.open_source_score - a.open_source_score;
+    } else if (category === 'certifications') {
+      if (b.certifications_score !== a.certifications_score) return b.certifications_score - a.certifications_score;
+    } else if (category === 'college_achievements') {
+      if (b.college_achievements_score !== a.college_achievements_score) return b.college_achievements_score - a.college_achievements_score;
+    }
+    // Overall tie-breaking hierarchy
+    return scoringEngine.compareStudents(a, b);
+  });
+
+  // 7. Assign ranks and limit
+  return filtered.slice(0, limit || 100).map((u, i) => ({
+    ...u,
+    rank: i + 1,
+  }));
 }
 
-async function buildLeaderboard(batchFilter, classFilter, limit) {
-  return buildLeaderboardFromAchievements(batchFilter, classFilter, limit);
-}
+// ─── GET /api/leaderboard/breakdown/:userId ────────────────────────────────────
+// Fully explainable score breakdown endpoint ("Why am I ranked #4?")
+router.get('/breakdown/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+
+    const [
+      { data: student },
+      userConns,
+      { data: achievements },
+    ] = await Promise.all([
+      supabase.from('students').select('*').eq('user_id', userId).maybeSingle(),
+      platformStore.getStudentConnections(userId),
+      supabase.from('achievements').select('*').eq('user_id', userId).eq('verified', true),
+    ]);
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const profileScore = scoringEngine.calculateStudentScore(
+      student,
+      userConns || [],
+      achievements || []
+    );
+
+    // Compute student's current department rank
+    const fullBoard = await buildUnifiedLeaderboard({ limit: 1000 });
+    const rankEntry = fullBoard.find((s) => s.id === userId);
+    const departmentRank = rankEntry ? rankEntry.rank : 1;
+
+    res.json({
+      student: {
+        id: student.user_id,
+        name: student.name,
+        roll_no: student.roll_no,
+        class: student.class,
+        batch: student.batch,
+        avatar_url: student.avatar_url,
+      },
+      department_rank: departmentRank,
+      total_students: fullBoard.length,
+      ...profileScore,
+      scoring_weights: SCORING_CONFIG.weights,
+    });
+  } catch (err) {
+    console.error('Error fetching score breakdown:', err);
+    res.status(500).json({ error: 'Failed to generate score breakdown' });
+  }
+});
 
 // ─── GET /api/leaderboard/stats ───────────────────────────────────────────────
 router.get('/stats', async (req, res) => {
@@ -98,31 +208,31 @@ router.get('/stats', async (req, res) => {
     const [
       { data: studentRows },
       { data: achRows },
-      { count: activeTeams }
+      { count: activeTeams },
+      allConnections,
     ] = await Promise.all([
       supabase.from('students').select('user_id'),
       supabase.from('achievements').select('user_id, type, position, verified, description').eq('verified', true),
-      supabase.from('teams').select('*', { count: 'exact', head: true })
+      supabase.from('teams').select('*', { count: 'exact', head: true }),
+      platformStore.getAllStudentConnections(),
     ]);
 
-    const validStudentUserIds = new Set((studentRows || []).map(s => s.user_id));
-
-    const validApproved = (achRows || []).filter(a => 
-      validStudentUserIds.has(a.user_id) && 
-      (!a.description || !a.description.trim().toUpperCase().includes('[REJECTED:'))
+    const validApproved = (achRows || []).filter(
+      (a) => !a.description || !a.description.trim().toUpperCase().includes('[REJECTED:')
     );
 
-    const totalStudents = studentRows ? studentRows.length : 0;
-    const totalAchievements = validApproved.length;
-    const totalHackathonWins = validApproved.filter(a => a.type === 'hackathon' && a.position === '1st').length;
-    const totalInternships = validApproved.filter(a => a.type === 'internship').length;
+    const connectedCount = (allConnections || []).filter(
+      (c) => c.connection_status === 'connected'
+    ).length;
 
     res.json({
-      totalStudents,
-      totalAchievements,
-      totalHackathonWins,
-      totalInternships,
+      totalStudents: studentRows ? studentRows.length : 0,
+      totalAchievements: validApproved.length,
+      totalHackathonWins: validApproved.filter((a) => a.type === 'hackathon' && a.position === '1st').length,
+      totalInternships: validApproved.filter((a) => a.type === 'internship').length,
       activeTeams: activeTeams || 0,
+      connectedPlatformsCount: connectedCount,
+      lastUpdated: new Date().toISOString(),
     });
   } catch (err) {
     console.error('Leaderboard stats error:', err);
@@ -133,15 +243,21 @@ router.get('/stats', async (req, res) => {
 // ─── GET /api/leaderboard/top ─────────────────────────────────────────────────
 router.get('/top', async (req, res) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  const top = await buildLeaderboard(null, null, 5);
+  const top = await buildUnifiedLeaderboard({ limit: 5 });
   res.json(top);
 });
 
-// ─── GET /api/leaderboard?batch=&class=&limit= ────────────────────────────────
+// ─── GET /api/leaderboard?batch=&class=&category=&search=&limit= ───────────────
 router.get('/', async (req, res) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  const { batch, class: cls, limit, year } = req.query;
-  const board = await buildLeaderboard(batch || year, cls, parseInt(limit) || 100);
+  const { batch, class: cls, limit, year, category, search } = req.query;
+  const board = await buildUnifiedLeaderboard({
+    batchFilter: batch || year,
+    classFilter: cls,
+    category: category || 'overall',
+    limit: parseInt(limit) || 100,
+    search: search || '',
+  });
   res.json(board);
 });
 

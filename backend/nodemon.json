@@ -1,0 +1,15 @@
+{
+  "ignore": [
+    "db/local_competitive_store.json",
+    "*.json",
+    "*.log"
+  ],
+  "watch": [
+    "server.js",
+    "routes/",
+    "middleware/",
+    "platforms/",
+    "services/",
+    "config/"
+  ]
+}

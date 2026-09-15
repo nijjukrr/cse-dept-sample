@@ -6,8 +6,9 @@ import { useAuth } from '../contexts/AuthContext';
 import { 
   Users, Award, Trophy, Briefcase, UsersRound, Star, Zap, BookOpen, 
   Rocket, Medal, Target, Megaphone, ChevronLeft, ChevronRight, Sparkles,
-  ZoomIn, X
+  ZoomIn, X, Terminal
 } from 'lucide-react';
+import { LogosCarousel } from '@/components/ui/LogosCarousel';
 
 const RANK_ICONS = [
   <Medal size={18} color="#B45309" strokeWidth={2.5} style={{ display: 'inline' }} />,
@@ -94,37 +95,14 @@ export default function Landing() {
       setAnnouncements(res.data || []);
     }).catch(() => {});
 
-    if (!user) return;
     Promise.all([
-      client.get('/leaderboard/stats'),
-      client.get('/leaderboard/top'),
+      client.get('/leaderboard/stats').catch(() => ({ data: {} })),
+      client.get('/leaderboard/top').catch(() => ({ data: [] })),
     ]).then(([s, t]) => {
-      setStats(s.data);
-      setTopStudents(t.data);
+      if (s.data) setStats(s.data);
+      if (t.data) setTopStudents(t.data);
     });
   }, [user]);
-
-  if (!user) {
-    return (
-      <div className="lp">
-        <section className="lp-hero" style={{ padding: '40px 0', minHeight: 'calc(100vh - 84px)', display: 'flex', alignItems: 'center' }}>
-          <div className="container" style={{ textAlign: 'center', maxWidth: '640px', margin: '0 auto' }}>
-            <div className="lp-pill" style={{ margin: '0 auto 24px' }}>
-              <span className="lp-pill-dot" />
-              Sri Shakthi Institute of Engineering and Technology, Coimbatore
-            </div>
-            <h1 className="lp-h1" style={{ marginBottom: '16px', fontSize: 'clamp(36px, 5vw, 56px)' }}>
-              Welcome to <br/><span className="lp-h1-accent">Inceptron Hub</span>
-            </h1>
-            <p className="lp-sub" style={{ margin: '0 auto 40px', fontSize: '18px' }}>
-              The exclusive achievement hub for SIET CSE Department. Track your progress, discover opportunities, and climb the leaderboard.
-            </p>
-            <Link to="/login" className="btn btn-primary btn-lg" style={{ padding: '16px 32px', fontSize: '16px' }}>Sign In to Portal →</Link>
-          </div>
-        </section>
-      </div>
-    );
-  }
 
   return (
     <div className="lp">
@@ -139,21 +117,28 @@ export default function Landing() {
             <div className="lp-hero-text">
               <div className="lp-pill">
                 <span className="lp-pill-dot" />
-                Sri Shakthi Institute of Engineering and Technology, Coimbatore
+                Sri Shakthi Institute of Engineering and Technology · CSE Department
               </div>
               <h1 className="lp-h1">
-                Inceptron<br />
-                <span className="lp-h1-accent">Achievement Hub</span>
+                SSIET CSE<br />
+                <span className="lp-h1-accent">Competitive Index</span>
               </h1>
               <p className="lp-sub">
-                Track hackathons, internships, projects and courses. Climb the leaderboard.
-                Form your team. Build your career at <strong>SIET</strong>.
+                One profile. Every platform. One department leaderboard. Connecting <strong>GitHub</strong>, <strong>LeetCode</strong>, <strong>Codeforces</strong>, <strong>HackerRank</strong>, <strong>CodeChef</strong>, and <strong>GFG</strong> into a transparent, normalized technical index.
               </p>
               <div className="lp-ctas">
-                <a href="http://110.172.151.102/" className="btn btn-primary btn-lg"><Rocket size={18} /> Sign In to Portal</a>
-                <Link to="/leaderboard" className="btn btn-secondary btn-lg"><Trophy size={18} /> Leaderboard</Link>
+                <Link to="/leaderboard" className="btn btn-primary btn-lg"><Trophy size={18} /> Department Leaderboard</Link>
+                {user ? (
+                  <Link to={`/profile/${user.id}`} className="btn btn-secondary btn-lg"><Terminal size={18} /> My Competitive Profile</Link>
+                ) : (
+                  <Link to="/login" className="btn btn-secondary btn-lg"><Rocket size={18} /> Sign In to Portal</Link>
+                )}
               </div>
             </div>
+          </div>
+
+          <div style={{ marginTop: 32 }}>
+            <LogosCarousel />
           </div>
         </div>
       </section>

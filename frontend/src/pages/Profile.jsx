@@ -6,9 +6,17 @@ import ScoreBadge from '../components/ScoreBadge';
 import AchievementCard from '../components/AchievementCard';
 import CustomSelect from '../components/CustomSelect';
 import TruncatedText from '../components/TruncatedText';
+import { StatusButton } from '@/components/ui/StatusButton';
+import { Badge } from '@/components/ui/Badge';
+import PlatformConnectionCard from '@/components/PlatformConnectionCard';
+import VerificationModal from '@/components/VerificationModal';
+import ConnectPlatformModal from '@/components/ConnectPlatformModal';
+import ScoreBreakdownModal from '@/components/ScoreBreakdownModal';
+import { parseErrorMessage } from '@/utils/errorHandler';
 import { 
   Shield, Book, GraduationCap, Terminal, Briefcase, AtSign, 
-  Camera, Globe, Phone, Plus, Cake, Edit3, Award, Lightbulb, Hourglass, Upload, FileText, X
+  Camera, Globe, Phone, Plus, Cake, Edit3, Award, Lightbulb, Hourglass, Upload, FileText, X,
+  Code, GitBranch, RefreshCw, ExternalLink, HelpCircle, Link2
 } from 'lucide-react';
 
 const ACH_TYPES = ['hackathon', 'internship', 'course', 'project', 'certification'];
@@ -30,12 +38,52 @@ export default function Profile() {
   const [proofFileError, setProofFileError] = useState(null);
   const [submittingAch, setSubmittingAch] = useState(false);
   const [toast, setToast] = useState(null);
+  const [platformData, setPlatformData] = useState({ platforms: [], competitive_profile: null });
+  const [showConnectModal, setShowConnectModal] = useState(false);
+  const [showBreakdownModal, setShowBreakdownModal] = useState(false);
+  const [verificationTarget, setVerificationTarget] = useState(null);
+  const [syncingPlatform, setSyncingPlatform] = useState(null);
+  const [defaultPlatformToConnect, setDefaultPlatformToConnect] = useState(null);
   const isOwn = authUser?.id === id;
   const fetchSeqRef = useRef(0);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
+  };
+
+  const fetchPlatforms = async () => {
+    try {
+      const res = await client.get(`/platforms/users/${id}`);
+      setPlatformData(res.data || { platforms: [], competitive_profile: null });
+    } catch (err) {
+      console.error('Failed to load user platforms:', err);
+    }
+  };
+
+  const handleSyncPlatform = async (platformCode) => {
+    setSyncingPlatform(platformCode);
+    try {
+      await client.post(`/platforms/users/${id}/${platformCode}/sync`);
+      showToast(`${platformCode.toUpperCase()} synchronized successfully!`);
+      fetchPlatforms();
+      fetchData();
+    } catch (err) {
+      showToast(parseErrorMessage(err, 'Sync failed'), 'error');
+    } finally {
+      setSyncingPlatform(null);
+    }
+  };
+
+  const handleDisconnectPlatform = async (platformCode) => {
+    try {
+      await client.delete(`/platforms/users/${id}/${platformCode}`);
+      showToast(`${platformCode.toUpperCase()} disconnected.`);
+      fetchPlatforms();
+      fetchData();
+    } catch (err) {
+      showToast('Failed to disconnect platform', 'error');
+    }
   };
 
   const achievementsRef = useRef(achievements);
@@ -82,12 +130,14 @@ export default function Profile() {
 
   useEffect(() => { 
     fetchData();
+    fetchPlatforms();
     const interval = setInterval(() => {
       if (!document.hidden) {
         fetchData();
+        fetchPlatforms();
       }
-    }, 5000);
-    const handleFocus = () => fetchData();
+    }, 10000);
+    const handleFocus = () => { fetchData(); fetchPlatforms(); };
 
     window.addEventListener('focus', handleFocus);
     window.addEventListener('scoreUpdated', fetchData);
@@ -383,6 +433,87 @@ export default function Profile() {
           </div>
         </div>
 
+        {/* Technical Platforms & Competitive Profile */}
+        {user.role === 'student' && (
+          <div className="animate-fadeInUp delay-1" style={{ marginBottom: '32px' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+              <div>
+                <h2 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, margin: 0 }}>
+                  <Terminal size={20} className="text-gradient" /> Verified Technical Platforms
+                </h2>
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                  External developer and competitive-programming profiles synchronized with department servers.
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                {platformData.competitive_profile && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setShowBreakdownModal(true)}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 700 }}
+                  >
+                    <HelpCircle size={14} /> Explain Score
+                  </button>
+                )}
+
+                {isOwn && (
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => {
+                      setDefaultPlatformToConnect(null);
+                      setShowConnectModal(true);
+                    }}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 700 }}
+                  >
+                    <Plus size={15} /> Connect Platform
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {(platformData.platforms || []).map((p) => {
+                const conn = {
+                  platform_code: p.code,
+                  username: p.username,
+                  profile_url: p.profile_url,
+                  connection_status: p.connected ? 'connected' : 'disconnected',
+                  ownership_status: p.ownership_status || (p.connected ? (p.verified ? 'verified' : 'unverified') : 'unlinked'),
+                  verification_token: p.verification_token,
+                  verification_level: p.verification_level,
+                  sync_status: p.sync_status || 'never_synced',
+                  platform_score: p.platform_score || 0,
+                  normalized_metrics: p.normalized_metrics,
+                  last_synced_at: p.last_synced_at,
+                  freshness: p.freshness,
+                  error_message: p.error_message,
+                };
+
+                return (
+                  <PlatformConnectionCard
+                    key={p.code}
+                    platform={p}
+                    connection={p.connected ? conn : null}
+                    isOwner={isOwn}
+                    onConnect={(plat) => {
+                      setDefaultPlatformToConnect(plat);
+                      setShowConnectModal(true);
+                    }}
+                    onVerifyOwnership={(plat, connection) => {
+                      setVerificationTarget({ platform: plat, connection });
+                    }}
+                    onSync={(code) => handleSyncPlatform(code)}
+                    onDisconnect={(code) => handleDisconnectPlatform(code)}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* My Teams */}
         {teams.length > 0 && (
           <div className="animate-fadeInUp delay-1" style={{ marginBottom: '32px' }}>
@@ -635,6 +766,40 @@ export default function Profile() {
           </div>
         </div>
       )}
+
+      {/* Connect Platform Modal */}
+      <ConnectPlatformModal
+        isOpen={showConnectModal}
+        onClose={() => setShowConnectModal(false)}
+        userId={id}
+        initialPlatform={defaultPlatformToConnect}
+        onSuccess={() => {
+          fetchPlatforms();
+          fetchData();
+        }}
+      />
+
+      {/* Verification Modal */}
+      {verificationTarget && (
+        <VerificationModal
+          platform={verificationTarget.platform}
+          connection={verificationTarget.connection}
+          open={Boolean(verificationTarget)}
+          onOpenChange={(isOpen) => !isOpen && setVerificationTarget(null)}
+          onSuccess={() => {
+            fetchPlatforms();
+            fetchData();
+          }}
+        />
+      )}
+
+      {/* Score Breakdown Modal */}
+      <ScoreBreakdownModal
+        isOpen={showBreakdownModal}
+        onClose={() => setShowBreakdownModal(false)}
+        profile={platformData.competitive_profile}
+        platforms={platformData.platforms}
+      />
 
       {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
 
