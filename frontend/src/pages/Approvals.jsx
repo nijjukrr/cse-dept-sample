@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { Navigate, Link } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
@@ -7,6 +7,8 @@ import {
   Briefcase, Zap, BookOpen, Rocket, Search, Filter, Hourglass, 
   FileText, Check, X, ArrowLeft, RefreshCw, AlertCircle, Calendar
 } from 'lucide-react';
+
+import { dispatchAchievementEvent, subscribeAchievementEvents } from '../utils/achievementEvents';
 
 const TYPE_CONFIG = {
   hackathon: { icon: <Zap size={14} />, label: 'Hackathon', badgeClass: 'type-hackathon' },
@@ -29,41 +31,11 @@ const DURATION_LABEL = {
   long: '⏱️ 3+ Months' 
 };
 
-function areAchievementsEqual(aList, bList) {
-  if (!aList || !bList) return aList === bList;
-  if (aList.length !== bList.length) return false;
-  for (let i = 0; i < aList.length; i++) {
-    const a = aList[i];
-    const b = bList[i];
-    if (!a || !b) return false;
-    if (
-      a.id !== b.id ||
-      a.status !== b.status ||
-      a.verified !== b.verified ||
-      a.title !== b.title ||
-      a.description !== b.description ||
-      a.position !== b.position ||
-      a.duration !== b.duration ||
-      a.student_name !== b.student_name ||
-      a.roll_no !== b.roll_no ||
-      a.class !== b.class ||
-      a.batch !== b.batch ||
-      a.created_at !== b.created_at
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
 export default function Approvals() {
-  const { user, isAdmin } = useAuth();
+  const { user } = useAuth();
   const [achievements, setAchievements] = useState([]);
-  const achievementsRef = useRef(achievements);
-  achievementsRef.current = achievements;
-  const isFetchingRef = useRef(false);
   const [loading, setLoading] = useState(true);
-  const [fetchError, setFetchError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [classFilter, setClassFilter] = useState('all');
@@ -71,71 +43,124 @@ export default function Approvals() {
   const [toast, setToast] = useState(null);
   const [rejectConfirm, setRejectConfirm] = useState(null);
   const [rejectionReason, setRejectionReason] = useState('');
-  const fetchSeqRef = useRef(0);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3500);
   };
 
-  const fetchPending = async ({ isInitial = false } = {}) => {
-    if (document.hidden || isFetchingRef.current) return;
-    isFetchingRef.current = true;
-    const currentSeq = ++fetchSeqRef.current;
-    if (isInitial && achievementsRef.current.length === 0) setLoading(true);
-    setFetchError(null);
+  const areAchievementsEqual = (listA, listB) => {
+    if (listA === listB) return true;
+    if (!listA || !listB) return false;
+    if (listA.length !== listB.length) return false;
+
+    for (let i = 0; i < listA.length; i++) {
+      const a = listA[i];
+      const b = listB[i];
+      if (
+        a.id !== b.id ||
+        a.user_id !== b.user_id ||
+        a.status !== b.status ||
+        a.verified !== b.verified ||
+        a.title !== b.title ||
+        a.description !== b.description ||
+        a.position !== b.position ||
+        a.duration !== b.duration ||
+        a.points !== b.points ||
+        a.student_name !== b.student_name ||
+        a.roll_no !== b.roll_no ||
+        a.class !== b.class ||
+        a.batch !== b.batch ||
+        a.created_at !== b.created_at
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const fetchPending = async ({ showLoader = false, isManualRefresh = false } = {}) => {
+    if (showLoader) setLoading(true);
+    if (isManualRefresh) setRefreshing(true);
+
     try {
       const res = await client.get('/achievements/all/pending');
-      if (currentSeq >= fetchSeqRef.current) {
-        const newData = res.data || [];
-        if (!areAchievementsEqual(achievementsRef.current, newData)) {
-          setAchievements(newData);
+      const newData = res.data || [];
+      setAchievements(prev => {
+        if (areAchievementsEqual(prev, newData)) {
+          return prev;
         }
-        setFetchError(null);
-      }
+        return newData;
+      });
     } catch {
-      if (currentSeq >= fetchSeqRef.current) {
-        if (isInitial) setFetchError('Unable to load pending submissions.');
-        if (isInitial) showToast('Failed to load pending achievements.', 'error');
+      if (showLoader || isManualRefresh) {
+        showToast('Failed to load pending achievements.', 'error');
       }
     } finally {
-      isFetchingRef.current = false;
-      if (currentSeq >= fetchSeqRef.current && isInitial) setLoading(false);
+      if (showLoader) setLoading(false);
+      if (isManualRefresh) setRefreshing(false);
     }
   };
 
   useEffect(() => {
-    fetchPending({ isInitial: achievementsRef.current.length === 0 });
-    const interval = setInterval(() => fetchPending({ isInitial: false }), 3000);
-    const handleFocus = () => fetchPending({ isInitial: false });
-    const handlePendingUpdated = () => fetchPending({ isInitial: false });
+    fetchPending({ showLoader: true });
 
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('pendingUpdated', handlePendingUpdated);
+    const unsubscribe = subscribeAchievementEvents((detail) => {
+      const { action, achievement, achievementId } = detail;
+      if (action === 'created' && achievement && (achievement.status === 'pending' || !achievement.verified)) {
+        setAchievements(prev => {
+          if (prev.some(a => a.id === achievement.id)) return prev;
+          return [achievement, ...prev];
+        });
+      } else if ((action === 'approved' || action === 'rejected' || action === 'deleted') && (achievementId || achievement?.id)) {
+        const targetId = achievementId || achievement?.id;
+        setAchievements(prev => prev.filter(a => a.id !== targetId));
+      }
+    });
 
     return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-      window.removeEventListener('pendingUpdated', handlePendingUpdated);
+      unsubscribe();
     };
   }, []);
 
+  const isAdmin = Boolean(user && (user.is_admin || user.role === 'admin' || user.role === 'faculty'));
   if (!isAdmin) {
     return <Navigate to="/" replace />;
   }
 
   const handleApprove = async (ach) => {
-    setActionInProgress(ach.id);
+    // 1. Instantly remove locally from UI & update notification badge (0ms delay)
+    setAchievements(prev => prev.filter(a => a.id !== ach.id));
+    showToast(`✓ Approved "${ach.title}"! +${ach.points} pts awarded to ${ach.student_name}.`);
+
+    dispatchAchievementEvent({
+      action: 'approved',
+      userId: ach.user_id,
+      achievementId: ach.id,
+      achievement: { ...ach, status: 'approved', verified: true }
+    });
+
     try {
-      await client.patch(`/achievements/${ach.id}/approve`);
-      setAchievements(prev => prev.filter(a => a.id !== ach.id));
-      showToast(`✓ Approved "${ach.title}"! +${ach.points} pts awarded to ${ach.student_name}.`);
-      window.dispatchEvent(new Event('pendingUpdated'));
-      window.dispatchEvent(new Event('scoreUpdated'));
+      const res = await client.patch(`/achievements/${ach.id}/approve`);
+      const resData = res.data || {};
+      if (typeof resData.score === 'number') {
+        dispatchAchievementEvent({
+          action: 'approved',
+          userId: resData.userId || ach.user_id,
+          achievement: resData.achievement || { ...ach, status: 'approved', verified: true },
+          score: resData.score,
+          achievement_count: resData.achievement_count
+        });
+      }
     } catch (err) {
+      // Rollback on failure
+      setAchievements(prev => [ach, ...prev]);
+      dispatchAchievementEvent({
+        action: 'created',
+        userId: ach.user_id,
+        achievement: ach
+      });
       showToast(err.response?.data?.error || 'Approval failed. Please try again.', 'error');
-    } finally {
-      setActionInProgress(null);
     }
   };
 
@@ -145,18 +170,40 @@ export default function Approvals() {
       return;
     }
     const cleanReason = reason.trim();
-    setActionInProgress(ach.id);
     setRejectConfirm(null);
+
+    // 1. Instantly remove locally from UI & update notification badge (0ms delay)
+    setAchievements(prev => prev.filter(a => a.id !== ach.id));
+    showToast(`✕ Rejected submission for ${ach.student_name}.`, 'error');
+
+    dispatchAchievementEvent({
+      action: 'rejected',
+      userId: ach.user_id,
+      achievementId: ach.id,
+      achievement: { ...ach, status: 'rejected', verified: false, rejection_reason: cleanReason }
+    });
+
     try {
-      await client.patch(`/achievements/${ach.id}/reject`, { rejection_reason: cleanReason });
-      setAchievements(prev => prev.filter(a => a.id !== ach.id));
-      showToast(`✕ Rejected submission for ${ach.student_name}.`, 'error');
-      window.dispatchEvent(new Event('pendingUpdated'));
-      window.dispatchEvent(new Event('scoreUpdated'));
+      const res = await client.patch(`/achievements/${ach.id}/reject`, { rejection_reason: cleanReason });
+      const resData = res.data || {};
+      if (typeof resData.score === 'number') {
+        dispatchAchievementEvent({
+          action: 'rejected',
+          userId: resData.userId || ach.user_id,
+          achievement: resData.achievement || { ...ach, status: 'rejected', verified: false, rejection_reason: cleanReason },
+          score: resData.score,
+          achievement_count: resData.achievement_count
+        });
+      }
     } catch (err) {
+      // Rollback on failure
+      setAchievements(prev => [ach, ...prev]);
+      dispatchAchievementEvent({
+        action: 'created',
+        userId: ach.user_id,
+        achievement: ach
+      });
       showToast(err.response?.data?.error || 'Rejection failed. Please try again.', 'error');
-    } finally {
-      setActionInProgress(null);
     }
   };
 
@@ -200,8 +247,8 @@ export default function Approvals() {
           </div>
 
           <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-            <button className="btn btn-secondary btn-sm" onClick={fetchPending} disabled={loading} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <RefreshCw size={14} className={loading ? 'anim-spin' : ''} /> Refresh
+            <button className="btn btn-secondary btn-sm" onClick={() => fetchPending({ isManualRefresh: true })} disabled={loading || refreshing} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <RefreshCw size={14} className={refreshing ? 'anim-spin' : ''} /> Refresh
             </button>
           </div>
         </div>
@@ -296,33 +343,32 @@ export default function Approvals() {
           </span>
         </div>
 
-        {/* List of Pending Items */}
+        {/* List Content */}
         {loading ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {[1, 2, 3].map(i => (
-              <div key={i} className="card skeleton-card" style={{ height: 140, padding: 20 }} />
-            ))}
+          <div className="grid-auto" style={{ gap: 20 }}>
+            <div className="card skeleton-card" style={{ height: 200 }} />
+            <div className="card skeleton-card" style={{ height: 200 }} />
           </div>
         ) : filtered.length === 0 ? (
-          <div className="card" style={{ padding: '60px 20px', textAlign: 'center' }}>
-            <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'rgba(34, 197, 94, 0.1)', color: 'var(--color-green)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
-              <CheckCircle size={32} />
+          <div className="card empty-state animate-fadeInUp">
+            <div className="empty-icon">
+              <CheckCircle size={48} color="var(--color-green)" style={{ opacity: 0.8 }} />
             </div>
-            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>All Caught Up!</h3>
-            <p style={{ color: 'var(--color-text-muted)', maxWidth: 420, margin: '0 auto', fontSize: 14 }}>
-              {search || typeFilter !== 'all' || classFilter !== 'all' 
-                ? 'No pending achievements match your active filters.' 
-                : 'There are no pending student achievement submissions waiting for verification.'}
+            <h3>All Caught Up! 🎉</h3>
+            <p>
+              {achievements.length === 0 
+                ? 'There are no pending achievement submissions awaiting review.' 
+                : 'No pending submissions match your current search filters.'}
             </p>
           </div>
         ) : (
-          <div className="approvals-list">
+          <div className="approvals-list animate-fadeInUp delay-3" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             {filtered.map(ach => {
-              const cfg = TYPE_CONFIG[ach.type] || TYPE_CONFIG.course;
+              const cfg = TYPE_CONFIG[ach.type] || TYPE_CONFIG.certification;
               const isWorking = actionInProgress === ach.id;
 
               return (
-                <div key={ach.id} className="card approval-card animate-fadeInUp">
+                <div key={ach.id} className="card approval-card" style={{ opacity: isWorking ? 0.6 : 1, transition: 'all 0.2s ease' }}>
                   {/* Left: Student Meta & Type */}
                   <div className="approval-card-main">
                     <div className="student-profile-strip">
@@ -338,7 +384,7 @@ export default function Approvals() {
                           <Link to={`/profile/${ach.user_id}`} className="student-name-link">
                             {ach.student_name}
                           </Link>
-                          <span className="badge badge-green" style={{ fontSize: 11, padding: '2px 8px' }}>{ach.roll_no}</span>
+                          <span className="badge" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--color-text-muted)', background: 'var(--bg-hover)', borderColor: 'var(--color-border)' }}>{ach.roll_no}</span>
                           {ach.class && <span className="badge" style={{ fontSize: 11, padding: '2px 8px', background: 'var(--bg-hover)' }}>{ach.class}</span>}
                           {ach.batch && <span className="badge" style={{ fontSize: 11, padding: '2px 8px', background: 'var(--bg-hover)' }}>{ach.batch}</span>}
                         </div>
@@ -439,42 +485,90 @@ export default function Approvals() {
 
         {/* Reject Confirmation Modal */}
         {rejectConfirm && (
-          <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setRejectConfirm(null)}>
-            <div className="modal" style={{ maxWidth: 460 }}>
-              <div className="modal-header">
-                <h2 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#DC2626' }}>
-                  <XCircle size={22} /> Reject Achievement
-                </h2>
-                <button className="modal-close btn btn-ghost" onClick={() => setRejectConfirm(null)}>✕</button>
-              </div>
-              <p style={{ fontSize: 14.5, lineHeight: 1.6, color: 'var(--color-text-muted)', marginBottom: 16 }}>
-                Rejecting <strong>"{rejectConfirm.title}"</strong> submitted by <strong>{rejectConfirm.student_name}</strong>. The achievement will remain in the student's profile marked as 🔴 <strong>Rejected</strong>, and 0 points will be added to the leaderboard.
-              </p>
-
-              <div className="form-group" style={{ marginBottom: 20 }}>
-                <label className="form-label" style={{ fontWeight: 700, color: 'var(--color-text)' }}>
-                  Reason for Rejection <span style={{ color: '#DC2626' }}>*</span>
-                </label>
-                <textarea
-                  className="form-input"
-                  rows={3}
-                  placeholder="e.g. Uploaded certificate does not clearly show the student's name..."
-                  value={rejectionReason}
-                  onChange={e => setRejectionReason(e.target.value)}
-                  style={{ resize: 'vertical' }}
-                  required
-                />
+          <div className="modal-overlay animate-fadeIn" onClick={e => e.target === e.currentTarget && setRejectConfirm(null)}>
+            <div className="modal card" style={{ maxWidth: 500, padding: 0, overflow: 'hidden', border: '1px solid rgba(220, 38, 38, 0.25)', boxShadow: '0 20px 40px rgba(0, 0, 0, 0.2)' }}>
+              
+              {/* Modal Banner Header */}
+              <div style={{ background: 'linear-gradient(135deg, rgba(220, 38, 38, 0.1) 0%, rgba(239, 68, 68, 0.05) 100%)', padding: '18px 24px', borderBottom: '1px solid rgba(220, 38, 38, 0.15)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ background: '#DC2626', color: '#fff', borderRadius: '50%', width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(220, 38, 38, 0.3)' }}>
+                    <XCircle size={18} />
+                  </div>
+                  <div>
+                    <h2 style={{ fontSize: 17, fontWeight: 700, margin: 0, color: 'var(--color-text)' }}>Reject Achievement</h2>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>Provide feedback for student rejection</div>
+                  </div>
+                </div>
+                <button className="btn btn-ghost btn-sm" onClick={() => setRejectConfirm(null)} style={{ padding: 6, borderRadius: '50%' }}><X size={18} /></button>
               </div>
 
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-                <button className="btn btn-secondary" onClick={() => setRejectConfirm(null)}>Cancel</button>
-                <button 
-                  className="btn btn-danger" 
-                  onClick={() => handleReject(rejectConfirm, rejectionReason)}
-                  disabled={!rejectionReason.trim()}
-                >
-                  Confirm Rejection
-                </button>
+              <div style={{ padding: '20px 24px' }}>
+                {/* Context Card */}
+                <div style={{ background: 'var(--bg-hover)', borderRadius: 'var(--radius-md)', padding: '12px 16px', marginBottom: 16, border: '1px solid var(--color-border)' }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)', marginBottom: 2 }}>Submission Details</div>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: 'var(--color-text)' }}>"{rejectConfirm.title}"</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--color-text-muted)', marginTop: 2 }}>Submitted by <strong>{rejectConfirm.student_name}</strong> ({rejectConfirm.roll_no || rejectConfirm.class || 'Student'})</div>
+                </div>
+
+                {/* Quick Chips */}
+                <div style={{ marginBottom: 14 }}>
+                  <label className="form-label" style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 6, display: 'block', color: 'var(--color-text-muted)' }}>Quick Reason Selection:</label>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {[
+                      'Verification document incomplete or invalid',
+                      'Student name missing on certificate',
+                      'Invalid or unreadable document link',
+                      'Duplicate achievement submission'
+                    ].map(reason => (
+                      <button
+                        key={reason}
+                        type="button"
+                        className="btn btn-xs"
+                        style={{
+                          fontSize: 11,
+                          padding: '4px 10px',
+                          borderRadius: 20,
+                          background: rejectionReason === reason ? 'rgba(220, 38, 38, 0.15)' : 'var(--bg-hover)',
+                          color: rejectionReason === reason ? '#DC2626' : 'var(--color-text-muted)',
+                          border: rejectionReason === reason ? '1px solid rgba(220, 38, 38, 0.4)' : '1px solid var(--color-border)',
+                          fontWeight: rejectionReason === reason ? 700 : 500
+                        }}
+                        onClick={() => setRejectionReason(reason)}
+                      >
+                        {reason}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Textarea */}
+                <div className="form-group" style={{ marginBottom: 20 }}>
+                  <label className="form-label" style={{ fontWeight: 700, fontSize: 12.5 }}>
+                    Detailed Rejection Reason <span style={{ color: '#DC2626' }}>*</span>
+                  </label>
+                  <textarea
+                    className="form-input"
+                    rows={3}
+                    placeholder="Enter rejection reason for the student..."
+                    value={rejectionReason}
+                    onChange={e => setRejectionReason(e.target.value)}
+                    style={{ resize: 'vertical', fontSize: 13.5, borderRadius: 'var(--radius-md)' }}
+                    required
+                  />
+                </div>
+
+                {/* Footer Buttons */}
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                  <button className="btn btn-secondary" onClick={() => setRejectConfirm(null)} style={{ padding: '8px 16px', fontSize: 13 }}>Cancel</button>
+                  <button 
+                    className="btn btn-danger" 
+                    onClick={() => handleReject(rejectConfirm, rejectionReason)}
+                    disabled={!rejectionReason.trim()}
+                    style={{ padding: '8px 18px', fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}
+                  >
+                    <XCircle size={15} /> Confirm Rejection
+                  </button>
+                </div>
               </div>
             </div>
           </div>

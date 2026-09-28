@@ -1,394 +1,321 @@
-import React, { useState, useEffect, useCallback } from "react";
-import axios from "axios";
-import { Link } from "react-router-dom";
-import { useAuth } from "@/contexts/AuthContext";
-import { GlowCardGrid } from "@/components/chanhdai/GlowCardGrid";
-import { DotGridSpotlight } from "@/components/chanhdai/DotGridSpotlight";
-import ScoreBreakdownModal from "@/components/ScoreBreakdownModal";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/Tabs";
-import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
-import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/Avatar";
-import {
-  Search,
-  Trophy,
-  Sparkles,
-  RefreshCw,
-  SlidersHorizontal,
-  ExternalLink,
-  Code,
-  ShieldCheck,
-  TrendingUp,
-  Clock,
-} from "lucide-react";
+import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import client from '../api/client';
+import ScoreBadge from '../components/ScoreBadge';
+import CustomSelect from '../components/CustomSelect';
+import FilterModal from '../components/FilterModal';
+import { Users, Award, Trophy, Briefcase, Medal, ArrowUp, ArrowDown, Minus } from 'lucide-react';
+import { subscribeAchievementEvents } from '../utils/achievementEvents';
+
+const BATCH_OPTIONS = ['2026-2030', '2025-2029', '2024-2028', '2023-2027', '2022-2026'];
+const CLASS_OPTIONS = ['CSE-A', 'CSE-B', 'CSE-C', 'CSE-D', 'CSE-E'];
 
 export default function Leaderboard() {
-  const { user } = useAuth();
   const [students, setStudents] = useState([]);
+  const [stats, setStats] = useState({ totalStudents: 0, totalAchievements: 0, totalHackathonWins: 0, totalInternships: 0 });
   const [loading, setLoading] = useState(true);
-  const [category, setCategory] = useState("overall");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [selectedBatch, setSelectedBatch] = useState("all");
-  const [selectedClass, setSelectedClass] = useState("all");
-  const [stats, setStats] = useState(null);
+  const [fetchError, setFetchError] = useState(false);
+  const [batchFilter, setBatchFilter] = useState('all');
+  const [classFilter, setClassFilter] = useState('all');
+  const [showFilters, setShowFilters] = useState(false);
 
-  // Score breakdown modal state
-  const [breakdownUserId, setBreakdownUserId] = useState(null);
-  const [isBreakdownOpen, setIsBreakdownOpen] = useState(false);
+  const isFilterActive = (batchFilter && batchFilter !== 'all') || (classFilter && classFilter !== 'all');
 
-  const fetchLeaderboard = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = {
-        category,
-        batch: selectedBatch !== "all" ? selectedBatch : undefined,
-        class: selectedClass !== "all" ? selectedClass : undefined,
-        search: searchQuery.trim() || undefined,
-        limit: 100,
-      };
-
-      const [boardRes, statsRes] = await Promise.all([
-        axios.get("/api/leaderboard", { params }),
-        axios.get("/api/leaderboard/stats"),
-      ]);
-
-      setStudents(boardRes.data || []);
-      setStats(statsRes.data || null);
-    } catch (err) {
-      console.error("Leaderboard fetch error:", err);
-    } finally {
-      setLoading(false);
+  const fetchLeaderboard = (showLoading = true) => {
+    if (showLoading) {
+      setLoading(true);
+      setFetchError(false);
     }
-  }, [category, selectedBatch, selectedClass, searchQuery]);
 
-  useEffect(() => {
-    fetchLeaderboard();
-  }, [fetchLeaderboard]);
+    const params = new URLSearchParams();
+    if (batchFilter && batchFilter !== 'all') params.append('batch', batchFilter);
+    if (classFilter && classFilter !== 'all') params.append('class', classFilter);
+    params.append('limit', '100');
 
-  const handleOpenBreakdown = (studentId) => {
-    setBreakdownUserId(studentId);
-    setIsBreakdownOpen(true);
+    Promise.allSettled([
+      client.get(`/leaderboard?${params}`),
+      client.get('/leaderboard/stats'),
+    ]).then(([lRes, sRes]) => {
+      if (lRes.status === 'fulfilled') {
+        setStudents(lRes.value.data || []);
+        setFetchError(false);
+      } else {
+        console.error('Leaderboard fetch error:', lRes.reason);
+        setFetchError(true);
+      }
+
+      if (sRes.status === 'fulfilled') {
+        setStats(sRes.value.data || {});
+      } else {
+        console.error('Leaderboard stats error:', sRes.reason);
+      }
+    }).finally(() => {
+      if (showLoading) setLoading(false);
+    });
   };
 
-  const myRankEntry = user ? students.find((s) => s.id === user.id) : null;
+  useEffect(() => {
+    fetchLeaderboard(true);
+
+    const unsubscribe = subscribeAchievementEvents((detail) => {
+      const { action } = detail;
+      if (action === 'approved' || action === 'deleted') {
+        fetchLeaderboard(false);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [batchFilter, classFilter]);
+
+  const top3 = students.slice(0, 3);
+  const rest = students.slice(3);
 
   return (
-    <div className="min-h-screen bg-slate-50/50 pb-20">
-      {/* Hero Section */}
-      <DotGridSpotlight className="border-b border-slate-200/80 bg-white py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl mx-auto">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <Badge variant="gold" className="text-xs px-2.5 py-0.5">
-                  CSE Department Index
-                </Badge>
-                <span className="text-xs text-slate-400">•</span>
-                <span className="text-xs font-mono text-slate-500">Authoritative Competitive Ranking</span>
-              </div>
-              <h1 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">
-                Department Leaderboard
-              </h1>
-              <p className="text-sm text-slate-600 max-w-2xl">
-                Unified technical score synthesized across GitHub, LeetCode, Codeforces, CodeChef, and verified college achievements. Deterministic, normalized, and explainable.
-              </p>
-            </div>
+    <div className="page-content">
+      <div className="container">
+        <div className="lb-header animate-fadeInUp">
+          <h1 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Trophy size={28} className="text-gradient" /> <span className="text-gradient">Leaderboard</span></h1>
+          <p className="section-subtitle">Ranked by total points across SIET CSE Department</p>
+        </div>
 
-            {/* User Quick Rank Callout */}
-            {user && (
-              <div className="flex items-center gap-3">
-                {myRankEntry ? (
-                  <div
-                    onClick={() => handleOpenBreakdown(user.id)}
-                    className="cursor-pointer rounded-2xl border border-ssiet-green-200 bg-ssiet-green-50/70 p-4 transition-all hover:border-ssiet-green-300 hover:shadow-xs"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-ssiet-green text-white font-black text-sm">
-                        #{myRankEntry.rank}
-                      </div>
-                      <div>
-                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                          Your Department Rank
-                        </div>
-                        <div className="text-lg font-black font-mono text-slate-900">
-                          {myRankEntry.overall_score || myRankEntry.score} pts
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-2 text-[11px] font-medium text-ssiet-green flex items-center gap-1">
-                      <span>Why am I ranked #{myRankEntry.rank}?</span>
-                      <ExternalLink className="h-3 w-3" />
-                    </div>
+        {/* Dept Stats */}
+        <div className="lb-stats-row animate-fadeInUp delay-1">
+          {[
+            { n: stats.totalStudents, l: 'Students', i: <Users size={24} /> },
+            { n: stats.totalAchievements, l: 'Achievements', i: <Award size={24} /> },
+            { n: stats.totalHackathonWins, l: 'Hackathon Wins', i: <Trophy size={24} /> },
+            { n: stats.totalInternships, l: 'Internships', i: <Briefcase size={24} /> },
+          ].map((s, i) => (
+            <div key={i} className="lb-stat card">
+              <span className="lb-stat-i">{s.i}</span>
+              <span className="lb-stat-n">{s.n || 0}</span>
+              <span className="lb-stat-l">{s.l}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Filters */}
+        <div className="lb-filters animate-fadeInUp delay-2">
+          <button 
+            className={`btn ${isFilterActive ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setShowFilters(true)}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+            Filters {isFilterActive && '(Active)'}
+          </button>
+        </div>
+
+        <FilterModal 
+          isOpen={showFilters} 
+          onClose={() => setShowFilters(false)}
+          onClear={() => { setBatchFilter('all'); setClassFilter('all'); }}
+        >
+          <div className="form-group">
+            <label className="form-label">Batch</label>
+            <CustomSelect
+              value={batchFilter}
+              onChange={setBatchFilter}
+              options={[{ value: 'all', label: 'All Batches' }, ...BATCH_OPTIONS.map(b => ({ value: b, label: b }))]}
+              placeholder="All Batches"
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Section</label>
+            <CustomSelect
+              value={classFilter}
+              onChange={setClassFilter}
+              options={[{ value: 'all', label: 'All Sections' }, ...CLASS_OPTIONS.map(c => ({ value: c, label: c }))]}
+              placeholder="All Sections"
+            />
+          </div>
+          <div style={{ height: '120px' }}></div>
+        </FilterModal>
+
+        {loading ? (
+          <div className="lb-table card">
+            <div className="lb-table-header">
+              <span>Rank</span>
+              <span>Student</span>
+              <span>Section</span>
+              <span>Wins</span>
+              <span>Achievements</span>
+              <span>Score</span>
+            </div>
+            {[1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="lb-row">
+                <div className="skeleton skeleton-text" style={{ width: '24px', margin: 0 }} />
+                <div className="lb-student">
+                  <div className="skeleton skeleton-circle" style={{ width: '34px', height: '34px' }} />
+                  <div style={{ flex: 1 }}>
+                    <div className="skeleton skeleton-text" style={{ width: '120px', margin: '0 0 4px' }} />
+                    <div className="skeleton skeleton-text" style={{ width: '60px', height: '10px', margin: 0 }} />
                   </div>
-                ) : (
-                  <Link to="/platforms">
-                    <Button variant="secondary" className="text-xs gap-1.5">
-                      <Code className="h-3.5 w-3.5" />
-                      Connect Platforms to Rank
-                    </Button>
-                  </Link>
+                </div>
+                <div className="skeleton skeleton-text" style={{ width: '40px', margin: 0 }} />
+                <div className="skeleton skeleton-text" style={{ width: '30px', margin: 0 }} />
+                <div className="skeleton skeleton-text" style={{ width: '20px', margin: 0 }} />
+                <div className="skeleton skeleton-text" style={{ width: '40px', margin: 0 }} />
+              </div>
+            ))}
+          </div>
+        ) : fetchError && students.length === 0 ? (
+          <div className="card" style={{ padding: '40px 20px', textAlign: 'center' }}>
+            <p style={{ color: '#DC2626', fontWeight: 600, fontSize: 15, marginBottom: 12 }}>
+              Failed to load leaderboard data. Please check your connection and try again.
+            </p>
+            <button className="btn btn-secondary btn-sm" onClick={() => fetchLeaderboard(true)}>Retry</button>
+          </div>
+        ) : students.length === 0 ? (
+          <div className="empty-state"><div className="empty-icon" style={{ marginBottom: '16px' }}><Trophy size={48} color="var(--color-green)" strokeWidth={1.5} opacity={0.6} /></div><h3>No students found</h3></div>
+        ) : (
+          <>
+            {/* Top 3 Podium */}
+            {(() => {
+              const showPodium = !isFilterActive && top3.length === 3 && top3[0].score > 0;
+              return (
+                <>
+                {showPodium && (
+                  <div className="podium animate-fadeInUp delay-2">
+                    {[top3[1], top3[0], top3[2]].map((s, i) => {
+                      const actualRank = s.rank;
+                      const colors = ['#FFD700', '#C0C0C0', '#CD7F32']; // Gold, Silver, Bronze
+                      const realH = [140, 180, 120][i]; // 2nd, 1st, 3rd Heights
+                      const realC = colors[actualRank - 1];
+                      return (
+                        <div key={s.id} className="podium-col">
+                          <Link to={`/profile/${s.id}`} className="podium-student" style={{ borderColor: realC + '40' }}>
+                            <div className="podium-ava" style={{ boxShadow: `0 0 20px ${realC}50` }}>{s.name[0]}</div>
+                            <div className="podium-sname">{s.name.split(' ')[0]}</div>
+                            <div className="podium-sclass">{s.class}</div>
+                            <ScoreBadge score={s.score} />
+                          </Link>
+                          <div className="podium-block" style={{ height: realH, background: `linear-gradient(to top, ${realC}20, ${realC}08)`, borderTop: `3px solid ${realC}`, borderLeft: '1px solid rgba(255,255,255,0.06)', borderRight: '1px solid rgba(255,255,255,0.06)' }}>
+                            <span style={{ display: 'flex', justifyContent: 'center', marginBottom: 4 }}><Medal size={28} color={realC} strokeWidth={2.5} /></span>
+                            <span style={{ fontSize: 16, fontWeight: 800, color: realC }}>{actualRank}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
-              </div>
-            )}
-          </div>
 
-          {/* Quick Metrics Strip */}
-          {stats && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-8 pt-6 border-t border-slate-100">
-              <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Total Ranked</div>
-                <div className="text-xl font-black font-mono text-slate-900">{stats.totalStudents || 0}</div>
-              </div>
-              <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Connected Accounts</div>
-                <div className="text-xl font-black font-mono text-ssiet-green">{stats.connectedPlatformsCount || 0}</div>
-              </div>
-              <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Hackathon Golds</div>
-                <div className="text-xl font-black font-mono text-amber-600">{stats.totalHackathonWins || 0}</div>
-              </div>
-              <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Verified Internships</div>
-                <div className="text-xl font-black font-mono text-blue-600">{stats.totalInternships || 0}</div>
-              </div>
-            </div>
-          )}
-        </div>
-      </DotGridSpotlight>
-
-      {/* Main Container */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-8 space-y-6">
-        {/* Top 3 Spotlight Podium */}
-        {!loading && students.length >= 3 && !searchQuery && selectedBatch === "all" && selectedClass === "all" && category === "overall" && (
-          <GlowCardGrid
-            students={students}
-            onSelectStudent={(s) => handleOpenBreakdown(s.id)}
-          />
-        )}
-
-        {/* Filter Controls Bar */}
-        <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xs space-y-4">
-          {/* Categories Tabs */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <Tabs value={category} onValueChange={setCategory} className="w-full sm:w-auto">
-              <TabsList className="bg-slate-100/90 p-1">
-                <TabsTrigger value="overall">Overall Index</TabsTrigger>
-                <TabsTrigger value="problem_solving">Problem Solving</TabsTrigger>
-                <TabsTrigger value="competitive_programming">Competitive (CP)</TabsTrigger>
-                <TabsTrigger value="open_source">Open Source</TabsTrigger>
-                <TabsTrigger value="college_achievements">College Wins</TabsTrigger>
-              </TabsList>
-            </Tabs>
-
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <Clock className="h-3.5 w-3.5" />
-              <span>Snapshot synchronized periodically</span>
-            </div>
-          </div>
-
-          {/* Search and Secondary Dropdowns */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-4 gap-3 pt-2 border-t border-slate-100">
-            {/* Search */}
-            <div className="relative sm:col-span-2">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Search coder by name or roll number..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-ssiet-green focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            {/* Batch Filter */}
-            <div>
-              <select
-                value={selectedBatch}
-                onChange={(e) => setSelectedBatch(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs text-slate-700 focus:border-ssiet-green focus:bg-white focus:outline-none font-medium"
-              >
-                <option value="all">All Batches</option>
-                <option value="2022-2026">Batch 2022-2026</option>
-                <option value="2023-2027">Batch 2023-2027</option>
-                <option value="2024-2028">Batch 2024-2028</option>
-              </select>
-            </div>
-
-            {/* Class Filter */}
-            <div>
-              <select
-                value={selectedClass}
-                onChange={(e) => setSelectedClass(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs text-slate-700 focus:border-ssiet-green focus:bg-white focus:outline-none font-medium"
-              >
-                <option value="all">All Sections</option>
-                <option value="CSE-A">CSE-A</option>
-                <option value="CSE-B">CSE-B</option>
-                <option value="CSE-C">CSE-C</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        {/* Leaderboard Table */}
-        <div className="rounded-2xl border border-slate-200/90 bg-white shadow-2xs overflow-hidden">
-          {loading ? (
-            <div className="py-24 text-center">
-              <RefreshCw className="h-7 w-7 animate-spin mx-auto text-ssiet-green" />
-              <p className="text-sm font-medium text-slate-500 mt-2">Computing competitive rankings...</p>
-            </div>
-          ) : students.length === 0 ? (
-            <div className="py-20 text-center space-y-2">
-              <Trophy className="h-8 w-8 mx-auto text-slate-300" />
-              <p className="text-sm font-semibold text-slate-700">No students match current filters</p>
-              <p className="text-xs text-slate-400">Try clearing search or filter selections.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-100 bg-slate-50/80 text-[11px] uppercase tracking-wider font-bold text-slate-500">
-                    <th className="py-3.5 px-4 w-16 text-center">Rank</th>
-                    <th className="py-3.5 px-4">Student</th>
-                    <th className="py-3.5 px-4 hidden sm:table-cell">Class / Roll</th>
-                    <th className="py-3.5 px-4 hidden md:table-cell">Connected Platforms</th>
-                    <th className="py-3.5 px-4 hidden lg:table-cell">Category Subscores</th>
-                    <th className="py-3.5 px-4 text-right">Score</th>
-                    <th className="py-3.5 px-4 w-12"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-sm">
-                  {students.map((student) => {
-                    const isMe = user && student.id === user.id;
-                    const isTopThree = student.rank <= 3;
+                {/* Ranking Table */}
+                <div className="lb-table card animate-fadeInUp delay-3">
+                  <div className="lb-table-header">
+                    <span>Rank</span>
+                    <span>Student</span>
+                    <span>Section</span>
+                    <span>Wins</span>
+                    <span>Achievements</span>
+                    <span>Score</span>
+                  </div>
+                  {(showPodium ? rest : students).map((s, idx) => {
+                    const displayRank = s.rank || idx + 1;
+                    const displayName = s.name || 'Student';
+                    const initials = (displayName || 'Student').split(' ').map((part) => part[0]).slice(0, 2).join('').toUpperCase() || 'S';
 
                     return (
-                      <tr
-                        key={student.id}
-                        className={`group transition-colors hover:bg-ssiet-green-50/30 ${
-                          isMe ? "bg-ssiet-green-50/50 font-medium" : ""
-                        }`}
-                      >
-                        {/* Rank */}
-                        <td className="py-3.5 px-4 text-center">
-                          <span
-                            className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-xs font-black ${
-                              student.rank === 1
-                                ? "bg-amber-500 text-white shadow-xs"
-                                : student.rank === 2
-                                ? "bg-slate-400 text-white shadow-xs"
-                                : student.rank === 3
-                                ? "bg-amber-700 text-white shadow-xs"
-                                : "text-slate-600 font-mono"
-                            }`}
-                          >
-                            {student.rank}
-                          </span>
-                        </td>
-
-                        {/* Student Details */}
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-3">
-                            <Avatar className="h-9 w-9 border border-slate-200">
-                              <AvatarImage src={student.avatar_url} />
-                              <AvatarFallback>{(student.name || "ST").slice(0, 2)}</AvatarFallback>
-                            </Avatar>
-                            <div>
-                              <Link
-                                to={`/profile/${student.id}`}
-                                className="font-bold text-slate-900 hover:text-ssiet-green transition-colors line-clamp-1"
-                              >
-                                {student.name}
-                                {isMe && (
-                                  <span className="ml-1.5 rounded bg-ssiet-green-100 text-ssiet-green-800 text-[10px] px-1.5 py-0.2 font-semibold">
-                                    You
-                                  </span>
-                                )}
-                              </Link>
-                              <div className="text-xs text-slate-400 sm:hidden">
-                                {student.roll_no} • {student.class}
-                              </div>
-                            </div>
+                      <Link to={`/profile/${s.id}`} key={s.id} className="lb-row" style={{ animationDelay: `${idx * 0.03}s` }}>
+                        <div className="lb-rank-container">
+                          <span className={`lb-rank ${displayRank <= 3 ? `rank-${displayRank}` : ''}`}>#{displayRank}</span>
+                        </div>
+                        <div className="lb-student">
+                          <div className="lb-ava">{initials}</div>
+                          <div>
+                            <div className="lb-name">{displayName}</div>
+                            <div className="lb-year">{s.batch || '—'}</div>
                           </div>
-                        </td>
-
-                        {/* Class & Roll */}
-                        <td className="py-3.5 px-4 hidden sm:table-cell text-xs text-slate-500">
-                          <div className="font-mono text-slate-700 font-semibold">{student.roll_no}</div>
-                          <div className="text-[11px] text-slate-400">{student.class || student.batch || "CSE"}</div>
-                        </td>
-
-                        {/* Connected Platforms Pill list */}
-                        <td className="py-3.5 px-4 hidden md:table-cell">
-                          <div className="flex flex-wrap gap-1.5">
-                            {(student.connected_platforms || []).map((p) => (
-                              <span
-                                key={p.code}
-                                className="rounded bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-700 capitalize border border-slate-200/60"
-                              >
-                                {p.code}
-                              </span>
-                            ))}
-                            {(!student.connected_platforms || student.connected_platforms.length === 0) && (
-                              <span className="text-xs text-slate-400 italic">College achievements</span>
-                            )}
-                          </div>
-                        </td>
-
-                        {/* Category Subscores */}
-                        <td className="py-3.5 px-4 hidden lg:table-cell text-xs text-slate-600 font-mono">
-                          <div className="flex items-center gap-3">
-                            <span title="Problem Solving">PS: <strong>{student.problem_solving_score}</strong></span>
-                            <span title="Competitive Programming">CP: <strong>{student.competitive_programming_score}</strong></span>
-                            <span title="Open Source">OS: <strong>{student.open_source_score}</strong></span>
-                          </div>
-                        </td>
-
-                        {/* Overall / Category Score */}
-                        <td className="py-3.5 px-4 text-right font-mono">
-                          <span className="text-base font-black text-slate-900">
-                            {category === "problem_solving"
-                              ? student.problem_solving_score
-                              : category === "competitive_programming"
-                              ? student.competitive_programming_score
-                              : category === "open_source"
-                              ? student.open_source_score
-                              : category === "college_achievements"
-                              ? student.college_achievements_score
-                              : student.overall_score || student.score}
-                          </span>
-                          <span className="text-xs text-slate-400 ml-1">pts</span>
-                        </td>
-
-                        {/* Action - Open Breakdown */}
-                        <td className="py-3.5 px-4 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenBreakdown(student.id)}
-                            className="rounded p-1.5 text-slate-400 hover:text-ssiet-green hover:bg-ssiet-green-50 transition-colors"
-                            title="Why am I ranked here? View score explanation"
-                          >
-                            <Sparkles className="h-4 w-4" />
-                          </button>
-                        </td>
-                      </tr>
+                        </div>
+                        <span className="lb-cell"><span className="badge badge-violet">{s.class}</span></span>
+                        <span className="lb-cell" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{s.gold_wins || 0} <Medal size={14} color="#eab308" /></span>
+                        <span className="lb-cell">{s.achievement_count}</span>
+                        <span className="lb-score text-gradient">{s.score}</span>
+                      </Link>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+                </div>
+                </>
+              );
+            })()}
+          </>
+        )}
       </div>
 
-      {/* Score Breakdown Modal */}
-      {breakdownUserId && (
-        <ScoreBreakdownModal
-          userId={breakdownUserId}
-          open={isBreakdownOpen}
-          onOpenChange={setIsBreakdownOpen}
-        />
-      )}
+      <style>{`
+        .lb-header { margin-bottom: 28px; }
+        .lb-stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 28px; }
+        .lb-stat { padding: 18px; display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; border-top: 3px solid var(--color-green); }
+        .lb-stat-i { font-size: 22px; }
+        .lb-stat-n { font-size: 26px; font-weight: 900; font-family: 'Space Grotesk', sans-serif; color: var(--color-green); }
+        .lb-stat-l { font-size: 11px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+        @media (max-width: 600px) { .lb-stats-row { grid-template-columns: repeat(2, 1fr); } }
+
+        .lb-filters { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 32px; }
+        .filter-label { font-size: 11px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; font-weight: 700; }
+
+        /* Podium — flat 2D */
+        .podium { display: flex; justify-content: center; align-items: flex-end; gap: 16px; margin-bottom: 40px; }
+        .podium-col { display: flex; flex-direction: column; align-items: center; }
+        .podium-student { padding: 16px 14px; border: 2px solid var(--border); border-radius: var(--radius-lg); text-align: center; text-decoration: none; color: inherit; transition: border-color var(--transition); min-width: 130px; background: var(--bg-card); }
+        .podium-student:hover { border-color: var(--color-green); }
+        .podium-ava { width: 60px; height: 60px; background: var(--color-green); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; color: #fff; margin: 0 auto 8px; }
+        .podium-sname { font-size: 14px; font-weight: 700; margin-bottom: 2px; color: var(--color-text); }
+        .podium-sclass { font-size: 12px; color: var(--color-text-muted); margin-bottom: 10px; }
+        .podium-block { width: 140px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+        
+        @media (max-width: 640px) {
+          .podium { gap: 8px; }
+          .podium-col { transform: scale(0.85); transform-origin: bottom center; }
+          .podium-student { min-width: 100px; padding: 12px 6px; }
+          .podium-block { width: 110px; }
+        }
+
+        /* Table */
+        .lb-table { overflow: hidden; margin-top: 8px; }
+        .lb-table-header { display: grid; grid-template-columns: 60px 2fr 100px 70px 120px 100px; gap: 12px; padding: 12px 20px; background: var(--bg-primary); font-size: 11px; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.08em; border-bottom: 1.5px solid var(--border); }
+        .lb-row { display: grid; grid-template-columns: 60px 2fr 100px 70px 120px 100px; gap: 12px; padding: 13px 20px; border-bottom: 1px solid var(--border); align-items: center; text-decoration: none; color: inherit; transition: background var(--transition); animation: fadeInUp 0.3s ease both; }
+        .lb-row:last-child { border-bottom: none; }
+        .lb-row:hover { background: var(--green-50); }
+
+        [data-theme="light"] .lb-table-header { background: var(--bg-alt); border-bottom: 1.5px solid var(--border); color: var(--color-text-muted); }
+        [data-theme="light"] .lb-row { background: var(--bg-card); border-bottom: 1px solid var(--border); color: var(--color-text); }
+        [data-theme="light"] .lb-row:hover { background: var(--green-50) !important; border-color: var(--color-green); }
+        [data-theme="light"] .lb-row.active, [data-theme="light"] .lb-row.selected { background: var(--green-100) !important; border-color: var(--color-green); }
+        [data-theme="light"] .lb-name { color: var(--color-text) !important; }
+        [data-theme="light"] .lb-year, [data-theme="light"] .lb-cell { color: var(--color-text-muted) !important; }
+        [data-theme="light"] .lb-score { color: var(--color-green) !important; }
+        [data-theme="light"] .lb-rank { color: var(--color-text) !important; }
+        [data-theme="light"] .podium-student { background: var(--bg-card); border: 2px solid var(--border); color: var(--color-text); }
+        [data-theme="light"] .podium-student:hover { background: var(--green-50); border-color: var(--color-green); }
+        [data-theme="light"] .podium-sname { color: #111827; }
+        [data-theme="light"] .podium-sclass { color: #4b5563; }
+        .lb-rank-container { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; }
+        .lb-rank { font-size: 14px; font-weight: 700; font-family: 'Space Grotesk', sans-serif; color: var(--color-text-muted); line-height: 1; }
+        .lb-student { display: flex; align-items: center; gap: 10px; }
+        .lb-ava { width: 34px; height: 34px; background: var(--color-green); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: #fff; flex-shrink: 0; }
+        .lb-name { font-size: 14px; font-weight: 600; color: var(--color-text); }
+        .lb-year { font-size: 12px; color: var(--color-text-muted); }
+        .lb-cell { font-size: 14px; color: var(--color-text-muted); }
+        .lb-score { font-size: 18px; font-weight: 900; font-family: 'Space Grotesk', sans-serif; color: var(--color-green); }
+        @media (max-width: 640px) {
+          .lb-table-header { display: none; }
+          .lb-row { 
+            display: flex; flex-wrap: wrap; 
+            padding: 16px; gap: 8px; 
+            border: 1px solid var(--border); 
+            border-radius: var(--radius-md); 
+            margin-bottom: 12px; 
+            position: relative;
+          }
+          .lb-row:last-child { border-bottom: 1px solid var(--border); }
+          .lb-rank-container { position: absolute; top: 16px; right: 16px; align-items: flex-end; }
+          .lb-student { width: 100%; margin-bottom: 8px; padding-right: 40px; }
+          .lb-cell { display: inline-flex; background: var(--bg-hover); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 12px; margin-right: 4px; }
+          .lb-score { width: 100%; text-align: center; border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 4px; }
+        }
+      `}</style>
     </div>
   );
 }

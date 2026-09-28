@@ -1,103 +1,189 @@
-import { Trash2, AlertTriangle, X } from 'lucide-react';
+import { useEffect } from 'react';
+import { AlertTriangle, Trash2, X } from 'lucide-react';
 
 export default function ConfirmModal({
   isOpen,
-  onClose,
-  onConfirm,
-  title = 'Are you sure?',
-  message = 'This action cannot be undone.',
-  confirmText = 'Confirm',
+  title = 'Confirm Action',
+  message = 'Are you sure you want to proceed?',
+  itemName = '',
+  confirmText = 'Delete',
   cancelText = 'Cancel',
-  type = 'danger',
-  loading = false
+  confirmVariant = 'danger',
+  iconType = 'danger',
+  onConfirm,
+  onCancel,
 }) {
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && isOpen) {
+        onCancel();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onCancel]);
+
   if (!isOpen) return null;
 
-  const isDanger = type === 'danger';
+  const getIcon = () => {
+    if (iconType === 'danger') {
+      return <Trash2 size={24} color="#DC2626" />;
+    }
+    return <AlertTriangle size={24} color="#D97706" />;
+  };
+
+  const getIconBg = () => {
+    if (iconType === 'danger') return 'rgba(239, 68, 68, 0.1)';
+    return 'rgba(245, 158, 11, 0.1)';
+  };
+
+  const getConfirmBtnStyle = () => {
+    if (confirmVariant === 'danger') {
+      return {
+        background: 'linear-gradient(135deg, #DC2626, #EF4444)',
+        color: '#FFFFFF',
+        boxShadow: '0 2px 8px rgba(220, 38, 38, 0.25)',
+      };
+    }
+    return {
+      background: 'var(--gradient-primary)',
+      color: '#FFFFFF',
+    };
+  };
 
   return (
     <div
-      className="modal-overlay animate-fadeIn"
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      className="modal-overlay"
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0, 0, 0, 0.72)',
+        backgroundColor: 'rgba(15, 32, 9, 0.45)',
         backdropFilter: 'blur(6px)',
-        zIndex: 99999,
+        zIndex: 9999,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: 20
+        padding: '16px',
+        animation: 'fadeIn 0.18s ease-out',
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onCancel();
       }}
     >
       <div
-        className="card animate-scaleIn"
-        onClick={e => e.stopPropagation()}
+        className="confirm-modal-card"
         style={{
-          maxWidth: 440,
+          background: 'var(--bg-card, #FFFFFF)',
+          borderRadius: '16px',
+          padding: '24px',
+          maxWidth: '420px',
           width: '100%',
-          padding: 24,
-          borderRadius: 'var(--radius-lg)',
-          boxShadow: 'var(--shadow-xl)',
-          background: 'var(--bg-card)',
-          border: isDanger ? '1.5px solid #FCA5A5' : '1.5px solid var(--border)'
+          boxShadow: '0 20px 40px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(213, 239, 200, 0.6)',
+          position: 'relative',
+          animation: 'scaleUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div
+        <button
+          onClick={onCancel}
+          style={{
+            position: 'absolute',
+            top: '16px',
+            right: '16px',
+            background: 'none',
+            border: 'none',
+            color: 'var(--color-text-faint, #8AAD72)',
+            cursor: 'pointer',
+            padding: '4px',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all 0.15s ease',
+          }}
+          aria-label="Close modal"
+        >
+          <X size={18} />
+        </button>
+
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
+          <div
+            style={{
+              width: '52px',
+              height: '52px',
+              borderRadius: '50%',
+              backgroundColor: getIconBg(),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: '16px',
+            }}
+          >
+            {getIcon()}
+          </div>
+
+          <h3 style={{ fontSize: '18px', fontWeight: '800', color: 'var(--color-text, #0F2009)', marginBottom: '8px', lineHeight: 1.3 }}>
+            {title}
+          </h3>
+
+          <p style={{ fontSize: '14px', color: 'var(--color-text-muted, #4A6E37)', lineHeight: 1.5, marginBottom: '24px' }}>
+            {itemName ? (
+              <>
+                Are you sure you want to delete <strong style={{ color: 'var(--color-text, #0F2009)' }}>"{itemName}"</strong>? This action cannot be undone.
+              </>
+            ) : (
+              message
+            )}
+          </p>
+
+          <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={onCancel}
               style={{
-                width: 42,
-                height: 42,
-                borderRadius: '50%',
-                background: isDanger ? '#FEF2F2' : 'var(--green-50)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0
+                flex: 1,
+                padding: '10px 16px',
+                borderRadius: '10px',
+                fontWeight: '600',
+                fontSize: '14px',
+                border: '1px solid var(--border, #D5EFC8)',
+                background: 'var(--bg-secondary, #FFFFFF)',
+                color: 'var(--color-text, #0F2009)',
               }}
             >
-              {isDanger ? (
-                <Trash2 size={20} color="#DC2626" />
-              ) : (
-                <AlertTriangle size={20} color="var(--color-green)" />
-              )}
-            </div>
-            <div>
-              <h3 style={{ fontSize: 17, fontWeight: 800, color: 'var(--color-text)', margin: 0 }}>{title}</h3>
-              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                SIET Inceptron Hub
-              </span>
-            </div>
+              {cancelText}
+            </button>
+
+            <button
+              type="button"
+              className="btn"
+              onClick={onConfirm}
+              style={{
+                flex: 1,
+                padding: '10px 16px',
+                borderRadius: '10px',
+                fontWeight: '700',
+                fontSize: '14px',
+                border: 'none',
+                ...getConfirmBtnStyle(),
+              }}
+            >
+              {confirmText}
+            </button>
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={onClose} style={{ padding: 4, borderRadius: '50%' }}>
-            <X size={18} />
-          </button>
-        </div>
-
-        <p style={{ fontSize: 14, color: 'var(--color-text-muted)', lineHeight: 1.6, marginBottom: 22 }}>
-          {message}
-        </p>
-
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={loading} style={{ padding: '8px 18px' }}>
-            {cancelText}
-          </button>
-          <button
-            className={`btn ${isDanger ? 'btn-danger' : 'btn-primary'} btn-sm`}
-            onClick={() => {
-              onConfirm();
-              onClose();
-            }}
-            disabled={loading}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 20px', fontWeight: 700 }}
-          >
-            {isDanger && <Trash2 size={15} />}
-            {loading ? 'Processing...' : confirmText}
-          </button>
         </div>
       </div>
+
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes scaleUp {
+          from { opacity: 0; transform: scale(0.94); }
+          to { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
     </div>
   );
 }

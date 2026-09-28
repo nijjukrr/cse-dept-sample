@@ -1,23 +1,18 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import { useUndoableDelete } from '../contexts/UndoDeleteContext';
 import ScoreBadge from '../components/ScoreBadge';
 import AchievementCard from '../components/AchievementCard';
 import CustomSelect from '../components/CustomSelect';
 import TruncatedText from '../components/TruncatedText';
-import { StatusButton } from '@/components/ui/StatusButton';
-import { Badge } from '@/components/ui/Badge';
-import PlatformConnectionCard from '@/components/PlatformConnectionCard';
-import VerificationModal from '@/components/VerificationModal';
-import ConnectPlatformModal from '@/components/ConnectPlatformModal';
-import ScoreBreakdownModal from '@/components/ScoreBreakdownModal';
-import { parseErrorMessage } from '@/utils/errorHandler';
 import { 
   Shield, Book, GraduationCap, Terminal, Briefcase, AtSign, 
-  Camera, Globe, Phone, Plus, Cake, Edit3, Award, Lightbulb, Hourglass, Upload, FileText, X,
-  Code, GitBranch, RefreshCw, ExternalLink, HelpCircle, Link2
+  Camera, Globe, Phone, Plus, Cake, Edit3, Award, Lightbulb, Hourglass, Upload, CheckCircle 
 } from 'lucide-react';
+
+import { dispatchAchievementEvent, subscribeAchievementEvents } from '../utils/achievementEvents';
 
 const ACH_TYPES = ['hackathon', 'internship', 'course', 'project', 'certification'];
 const POSITIONS = ['1st', '2nd', '3rd', 'participated'];
@@ -25,95 +20,44 @@ const DURATIONS = ['short', 'medium', 'long'];
 
 export default function Profile() {
   const { id } = useParams();
-  const { user: authUser, refreshUser } = useAuth();
+  const { user: authUser, updateUserStats } = useAuth();
+  const { requestUndoableDelete } = useUndoableDelete();
   const [user, setUser] = useState(null);
   const [achievements, setAchievements] = useState([]);
   const [teams, setTeams] = useState([]);
   const [invites, setInvites] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadedFileName, setUploadedFileName] = useState('');
   const [form, setForm] = useState({ type: 'hackathon', title: '', description: '', position: '', duration: '', proof_url: '' });
-  const [selectedProofFile, setSelectedProofFile] = useState(null);
-  const [proofUploadMode, setProofUploadMode] = useState('file'); // 'file' | 'url'
-  const [proofFileError, setProofFileError] = useState(null);
-  const [submittingAch, setSubmittingAch] = useState(false);
   const [toast, setToast] = useState(null);
-  const [platformData, setPlatformData] = useState({ platforms: [], competitive_profile: null });
-  const [showConnectModal, setShowConnectModal] = useState(false);
-  const [showBreakdownModal, setShowBreakdownModal] = useState(false);
-  const [verificationTarget, setVerificationTarget] = useState(null);
-  const [syncingPlatform, setSyncingPlatform] = useState(null);
-  const [defaultPlatformToConnect, setDefaultPlatformToConnect] = useState(null);
   const isOwn = authUser?.id === id;
-  const fetchSeqRef = useRef(0);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
   };
 
-  const fetchPlatforms = async () => {
-    try {
-      const res = await client.get(`/platforms/users/${id}`);
-      setPlatformData(res.data || { platforms: [], competitive_profile: null });
-    } catch (err) {
-      console.error('Failed to load user platforms:', err);
-    }
-  };
-
-  const handleSyncPlatform = async (platformCode) => {
-    setSyncingPlatform(platformCode);
-    try {
-      await client.post(`/platforms/users/${id}/${platformCode}/sync`);
-      showToast(`${platformCode.toUpperCase()} synchronized successfully!`);
-      fetchPlatforms();
-      fetchData();
-    } catch (err) {
-      showToast(parseErrorMessage(err, 'Sync failed'), 'error');
-    } finally {
-      setSyncingPlatform(null);
-    }
-  };
-
-  const handleDisconnectPlatform = async (platformCode) => {
-    try {
-      await client.delete(`/platforms/users/${id}/${platformCode}`);
-      showToast(`${platformCode.toUpperCase()} disconnected.`);
-      fetchPlatforms();
-      fetchData();
-    } catch (err) {
-      showToast('Failed to disconnect platform', 'error');
-    }
-  };
-
-  const achievementsRef = useRef(achievements);
-  achievementsRef.current = achievements;
-
   const fetchData = async () => {
-    const currentSeq = ++fetchSeqRef.current;
+    setLoading(true);
     try {
       const [userRes, achRes, teamRes] = await Promise.all([
         client.get(`/users/${id}`).catch(err => { console.error(err); return { data: null }; }),
         client.get(`/achievements/user/${id}`).catch(err => { console.error(err); return { data: [] }; }),
         client.get(`/teams/user/${id}`).catch(err => { console.error(err); return { data: [] }; })
       ]);
-      if (currentSeq >= fetchSeqRef.current) {
-        setUser(userRes.data);
-        const newAchs = achRes.data || [];
-        const isSame = achievementsRef.current.length === newAchs.length && 
-          achievementsRef.current.every((a, idx) => a.id === newAchs[idx]?.id && a.status === newAchs[idx]?.status && a.verified === newAchs[idx]?.verified);
-        if (!isSame) {
-          setAchievements(newAchs);
-        }
-        setTeams(teamRes.data);
+      setUser(userRes.data);
+      setAchievements(achRes.data || []);
+      setTeams(teamRes.data || []);
 
-        if (authUser?.id === id) {
-          const { data: invRes } = await client.get('/teams/my-invites').catch(() => ({ data: [] }));
-          if (currentSeq >= fetchSeqRef.current) setInvites(invRes || []);
-        }
+      if (authUser?.id === id) {
+        const { data: invRes } = await client.get('/teams/my-invites').catch(() => ({ data: [] }));
+        setInvites(invRes || []);
       }
     } finally {
-      if (currentSeq >= fetchSeqRef.current) setLoading(false);
+      setLoading(false);
     }
   };
 
@@ -122,7 +66,7 @@ export default function Profile() {
       if (action === 'approve') await client.post(`/teams/invites/${inviteId}/approve`);
       else await client.delete(`/teams/invites/${inviteId}`);
       showToast(action === 'approve' ? 'Joined team! 🎉' : 'Invite declined');
-      fetchData();
+      setInvites(prev => prev.filter(i => i.id !== inviteId));
     } catch (err) {
       showToast('Action failed', 'error');
     }
@@ -130,123 +74,169 @@ export default function Profile() {
 
   useEffect(() => { 
     fetchData();
-    fetchPlatforms();
-    const interval = setInterval(() => {
-      if (!document.hidden) {
-        fetchData();
-        fetchPlatforms();
-      }
-    }, 10000);
-    const handleFocus = () => { fetchData(); fetchPlatforms(); };
 
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('scoreUpdated', fetchData);
-    window.addEventListener('pendingUpdated', fetchData);
+    const unsubscribe = subscribeAchievementEvents((detail) => {
+      const { action, userId, achievement, achievementId, score, achievement_count } = detail;
+      if (userId === id) {
+        if (action === 'created' && achievement) {
+          setAchievements(prev => [achievement, ...prev.filter(a => a.id !== achievement.id)]);
+        } else if ((action === 'approved' || action === 'rejected') && achievement) {
+          setAchievements(prev => prev.map(a => a.id === achievement.id ? achievement : a));
+        } else if (action === 'deleted' && achievementId) {
+          setAchievements(prev => prev.filter(a => a.id !== achievementId));
+        }
+
+        if (typeof score === 'number' && typeof achievement_count === 'number') {
+          setUser(prev => prev ? ({ ...prev, score, achievement_count }) : prev);
+          if (isOwn) {
+            updateUserStats({ score, achievement_count });
+          }
+        }
+      }
+    });
 
     return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-      window.removeEventListener('scoreUpdated', fetchData);
-      window.removeEventListener('pendingUpdated', fetchData);
+      unsubscribe();
     };
-  }, [id]);
+  }, [id, authUser?.id]);
 
-  const handleProofFileChange = (e) => {
-    const file = e.target.files?.[0];
+  const handleFileUpload = async (file) => {
     if (!file) return;
-    setProofFileError(null);
-
-    // Validate size (max 5MB)
     if (file.size > 5 * 1024 * 1024) {
-      setProofFileError('File size exceeds maximum limit of 5MB.');
-      setSelectedProofFile(null);
+      showToast('File size exceeds maximum limit of 5 MB', 'error');
       return;
     }
 
-    // Validate MIME / extension
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
-    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
-    const allowedExts = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+    setUploadingFile(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
 
-    if (!allowedTypes.includes((file.type || '').toLowerCase()) && !allowedExts.includes(ext)) {
-      setProofFileError('Invalid file type. Supported formats: JPG, PNG, WEBP, PDF.');
-      setSelectedProofFile(null);
-      return;
+      const res = await client.post('/uploads/proof', formData);
+      const resData = res.data || {};
+
+      if (!resData.storage_ref) {
+        throw new Error(resData.error || 'Failed to upload photo/document');
+      }
+
+      setForm(prev => ({
+        ...prev,
+        proof_url: resData.storage_ref
+      }));
+      setUploadedFileName(file.name);
+      showToast('Proof document uploaded successfully!');
+    } catch (err) {
+      const errorMsg = err.response?.data?.error || err.message || 'Proof storage is unavailable';
+      console.error('Upload proof error:', errorMsg);
+      showToast(errorMsg, 'error');
+    } finally {
+      setUploadingFile(false);
     }
-
-    setSelectedProofFile(file);
   };
 
   const addAchievement = async (e) => {
     e.preventDefault();
-    setSubmittingAch(true);
-    setProofFileError(null);
+    if (submitting) return;
+    setSubmitting(true);
+
+    const tempId = 'temp-' + Date.now();
+    const isPrivileged = authUser?.role === 'admin' || authUser?.role === 'faculty';
+    const optimisticAch = {
+      id: tempId,
+      user_id: authUser?.id || id,
+      type: form.type,
+      title: form.title,
+      description: form.description || null,
+      position: form.position || null,
+      duration: form.duration || null,
+      proof_url: form.proof_url || null,
+      points: form.type === 'hackathon' ? (form.position === '1st' ? 100 : form.position === '2nd' ? 60 : form.position === '3rd' ? 40 : 10)
+        : form.type === 'internship' ? (form.duration === 'long' ? 70 : form.duration === 'medium' ? 40 : 20)
+        : form.type === 'course' ? 15 : form.type === 'project' ? 25 : 10,
+      status: isPrivileged ? 'approved' : 'pending',
+      verified: isPrivileged,
+      created_at: new Date().toISOString()
+    };
+
+    const submittedForm = { ...form };
+    setShowAddModal(false);
+    setForm({ type: 'hackathon', title: '', description: '', position: '', duration: '', proof_url: '' });
+    setAchievements(prev => [optimisticAch, ...prev]);
+    showToast(<span>Achievement submitted for Admin Approval! <Hourglass size={14} style={{ display: 'inline', verticalAlign: 'middle' }} /></span>);
 
     try {
-      let finalProofUrl = form.proof_url;
+      const res = await client.post('/achievements', submittedForm);
+      const resData = res.data || {};
+      const newAch = resData.achievement || resData;
+      const score = resData.score;
+      const achievement_count = resData.achievement_count;
 
-      if (proofUploadMode === 'file' && selectedProofFile) {
-        const formData = new FormData();
-        formData.append('file', selectedProofFile);
-
-        try {
-          const uploadRes = await client.post('/uploads/achievement-proof', formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
-          if (uploadRes.data?.url) {
-            finalProofUrl = uploadRes.data.url;
-          }
-        } catch (uploadErr) {
-          const errMsg = uploadErr.response?.data?.error || 'File upload is not configured yet. You can paste a public URL instead.';
-          setProofFileError(errMsg);
-          if (uploadErr.response?.data?.storage_available === false) {
-            setProofUploadMode('url');
-          }
-          showToast(errMsg, 'error');
-          setSubmittingAch(false);
-          return;
+      setAchievements(prev => [newAch, ...prev.filter(a => a.id !== tempId && a.id !== newAch.id)]);
+      if (typeof score === 'number' && typeof achievement_count === 'number') {
+        setUser(prev => prev ? ({ ...prev, score, achievement_count }) : prev);
+        if (isOwn) {
+          updateUserStats({ score, achievement_count });
         }
       }
 
-      const payload = { ...form, proof_url: finalProofUrl };
-      const { data } = await client.post('/achievements', payload);
-      setAchievements(prev => [data, ...prev]);
-      setShowAddModal(false);
-      setForm({ type: 'hackathon', title: '', description: '', position: '', duration: '', proof_url: '' });
-      setSelectedProofFile(null);
-      setProofFileError(null);
-      setProofUploadMode('file');
-      showToast(<span>Achievement submitted for Admin Approval! <Hourglass size={14} style={{ display: 'inline', verticalAlign: 'middle' }} /></span>);
-      window.dispatchEvent(new Event('pendingUpdated'));
-      window.dispatchEvent(new Event('scoreUpdated'));
-      if (isOwn) refreshUser();
+      dispatchAchievementEvent({
+        action: 'created',
+        userId: authUser?.id || id,
+        achievement: newAch,
+        score,
+        achievement_count
+      });
     } catch (err) {
+      setAchievements(prev => prev.filter(a => a.id !== tempId));
       showToast(err.response?.data?.error || 'Failed to add achievement', 'error');
     } finally {
-      setSubmittingAch(false);
+      setSubmitting(false);
     }
   };
 
   const deleteAchievement = async (achId) => {
     const ach = achievements.find(a => a.id === achId);
     if (!ach) return;
-    try {
-      const { data } = await client.delete(`/achievements/${achId}`);
-      setAchievements(prev => prev.filter(a => a.id !== achId));
-      if (data && typeof data.score === 'number' && typeof data.achievement_count === 'number') {
-        setUser(prev => ({
-          ...prev,
-          score: data.score,
-          achievement_count: data.achievement_count
-        }));
+    const wasPending = ach.status === 'pending' || !ach.verified;
+
+    requestUndoableDelete({
+      id: achId,
+      type: 'Achievement',
+      label: ach.title || 'Achievement Record',
+      itemData: ach,
+      onOptimisticRemove: () => {
+        setAchievements(prev => prev.filter(a => a.id !== achId));
+      },
+      onRestore: () => {
+        setAchievements(prev => {
+          if (prev.some(a => a.id === achId)) return prev;
+          return [...prev, ach];
+        });
+      },
+      onCommit: async () => {
+        const res = await client.delete(`/achievements/${achId}`);
+        const resData = res.data || {};
+
+        if (typeof resData.score === 'number' && typeof resData.achievement_count === 'number') {
+          setUser(prev => prev ? ({ ...prev, score: resData.score, achievement_count: resData.achievement_count }) : prev);
+          if (isOwn) {
+            updateUserStats({ score: resData.score, achievement_count: resData.achievement_count });
+          }
+        }
+
+        dispatchAchievementEvent({
+          action: 'deleted',
+          userId: id,
+          achievementId: achId,
+          wasPending: resData.wasPending !== undefined ? resData.wasPending : wasPending,
+          score: resData.score,
+          achievement_count: resData.achievement_count
+        });
+      },
+      onFailure: (err) => {
+        showToast(err?.response?.data?.error || 'Failed to delete achievement', 'error');
       }
-      showToast('Achievement removed');
-      window.dispatchEvent(new Event('pendingUpdated'));
-      window.dispatchEvent(new Event('scoreUpdated'));
-      if (isOwn) refreshUser();
-    } catch (err) {
-      showToast(err.response?.data?.error || 'Failed to delete achievement', 'error');
-    }
+    });
   };
 
   const renderSkeleton = () => (
@@ -280,8 +270,17 @@ export default function Profile() {
     const filled = fields.filter(f => !!user[f]).length;
     completionPct = Math.round((filled / fields.length) * 100);
   }
+  const isApprovedAchievement = (a) => {
+    if (!a) return false;
+    const desc = a.description || '';
+    if (desc.trim().toUpperCase().includes('[REJECTED:')) return false;
+    if (a.status === 'rejected') return false;
+    if (a.status === 'approved') return true;
+    return a.verified === true;
+  };
+
   const typeBreakdown = ACH_TYPES.map(t => {
-    const approvedList = achievements.filter(a => a.type === t && (a.status ? a.status === 'approved' : a.verified === true));
+    const approvedList = achievements.filter(a => a.type === t && isApprovedAchievement(a));
     return {
       type: t,
       count: approvedList.length,
@@ -334,7 +333,7 @@ export default function Profile() {
             <div className="profile-info">
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                 <h1 className="profile-name">{user.name}</h1>
-                {user.role === 'student' && <span className="badge badge-violet">{rank} Tier</span>}
+                {user.role === 'student' && <span className={`badge tier-${(rank || 'bronze').toLowerCase()}`}>{rank} Tier</span>}
                 {user.is_admin && <span className="badge badge-gold" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Shield size={14} /> {user.role === 'admin' ? 'Admin' : 'Faculty'}</span>}
               </div>
               <div className="profile-meta">
@@ -432,87 +431,6 @@ export default function Profile() {
             )}
           </div>
         </div>
-
-        {/* Technical Platforms & Competitive Profile */}
-        {user.role === 'student' && (
-          <div className="animate-fadeInUp delay-1" style={{ marginBottom: '32px' }}>
-            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-              <div>
-                <h2 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, margin: 0 }}>
-                  <Terminal size={20} className="text-gradient" /> Verified Technical Platforms
-                </h2>
-                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                  External developer and competitive-programming profiles synchronized with department servers.
-                </span>
-              </div>
-
-              <div style={{ display: 'flex', gap: 8 }}>
-                {platformData.competitive_profile && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setShowBreakdownModal(true)}
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 700 }}
-                  >
-                    <HelpCircle size={14} /> Explain Score
-                  </button>
-                )}
-
-                {isOwn && (
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-sm"
-                    onClick={() => {
-                      setDefaultPlatformToConnect(null);
-                      setShowConnectModal(true);
-                    }}
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 700 }}
-                  >
-                    <Plus size={15} /> Connect Platform
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-              {(platformData.platforms || []).map((p) => {
-                const conn = {
-                  platform_code: p.code,
-                  username: p.username,
-                  profile_url: p.profile_url,
-                  connection_status: p.connected ? 'connected' : 'disconnected',
-                  ownership_status: p.ownership_status || (p.connected ? (p.verified ? 'verified' : 'unverified') : 'unlinked'),
-                  verification_token: p.verification_token,
-                  verification_level: p.verification_level,
-                  sync_status: p.sync_status || 'never_synced',
-                  platform_score: p.platform_score || 0,
-                  normalized_metrics: p.normalized_metrics,
-                  last_synced_at: p.last_synced_at,
-                  freshness: p.freshness,
-                  error_message: p.error_message,
-                };
-
-                return (
-                  <PlatformConnectionCard
-                    key={p.code}
-                    platform={p}
-                    connection={p.connected ? conn : null}
-                    isOwner={isOwn}
-                    onConnect={(plat) => {
-                      setDefaultPlatformToConnect(plat);
-                      setShowConnectModal(true);
-                    }}
-                    onVerifyOwnership={(plat, connection) => {
-                      setVerificationTarget({ platform: plat, connection });
-                    }}
-                    onSync={(code) => handleSyncPlatform(code)}
-                    onDisconnect={(code) => handleDisconnectPlatform(code)}
-                  />
-                );
-              })}
-            </div>
-          </div>
-        )}
 
         {/* My Teams */}
         {teams.length > 0 && (
@@ -645,106 +563,72 @@ export default function Profile() {
               )}
 
               <div className="form-group">
-                <label className="form-label" style={{ fontWeight: 700, marginBottom: 6, display: 'block' }}>
-                  Certificate / Proof
+                <label className="form-label" style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Upload size={16} /> Certificate Photo / Verification Proof
                 </label>
-                
-                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-                  <button
-                    type="button"
-                    className={`btn btn-sm ${proofUploadMode === 'file' ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setProofUploadMode('file')}
-                  >
-                    Choose File
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-sm ${proofUploadMode === 'url' ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setProofUploadMode('url')}
-                  >
-                    Paste Certificate URL
-                  </button>
+
+                <div style={{
+                  border: '2px dashed var(--color-border)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '16px',
+                  textAlign: 'center',
+                  background: 'var(--bg-hover)',
+                  marginBottom: '10px'
+                }}>
+                  {uploadingFile ? (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, color: 'var(--color-green)' }}>
+                      <Hourglass size={16} className="spin" /> Uploading photo to storage...
+                    </div>
+                  ) : uploadedFileName ? (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(34, 197, 94, 0.1)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-green)', fontWeight: 600 }}>
+                        <CheckCircle size={16} /> {uploadedFileName}
+                      </div>
+                      <button 
+                        type="button" 
+                        className="btn btn-ghost btn-xs" 
+                        onClick={() => { setUploadedFileName(''); setForm(f => ({ ...f, proof_url: '' })); }}
+                        style={{ color: '#DC2626', padding: '2px 6px' }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : (
+                    <div>
+                      <input 
+                        type="file" 
+                        id="proof-file-input"
+                        accept="image/jpeg,image/png,image/webp,application/pdf"
+                        onChange={e => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
+                        style={{ display: 'none' }}
+                      />
+                      <label 
+                        htmlFor="proof-file-input" 
+                        className="btn btn-secondary btn-sm" 
+                        style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Camera size={15} /> Upload Photo / PDF Certificate (Max 5MB)
+                      </label>
+                      <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 6 }}>
+                        Upload JPG, PNG photo, or PDF document
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {proofUploadMode === 'file' ? (
-                  <div>
-                    {!selectedProofFile ? (
-                      <label style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: '18px',
-                        border: '2px dashed var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        cursor: 'pointer',
-                        background: 'var(--color-bg-alt, #f8fafc)',
-                        transition: 'all 0.2s'
-                      }}>
-                        <Upload size={22} style={{ marginBottom: 6, color: 'var(--color-text-muted)' }} />
-                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>Click to Choose Certificate / Proof</span>
-                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                          Supported: JPG, PNG, WEBP, PDF (Max 5MB)
-                        </span>
-                        <input
-                          type="file"
-                          accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf"
-                          onChange={handleProofFileChange}
-                          style={{ display: 'none' }}
-                        />
-                      </label>
-                    ) : (
-                      <div style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justify: 'space-between',
-                        padding: '10px 14px',
-                        background: 'var(--color-bg-alt, #f8fafc)',
-                        border: '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)'
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, overflow: 'hidden' }}>
-                          <FileText size={20} color="var(--color-green)" />
-                          <div style={{ minWidth: 0 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                              Selected: {selectedProofFile.name}
-                            </div>
-                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                              {(selectedProofFile.size / (1024 * 1024)).toFixed(2)} MB
-                            </div>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => setSelectedProofFile(null)}
-                          style={{ color: '#ef4444', padding: '4px 8px' }}
-                        >
-                          Remove file
-                        </button>
-                      </div>
-                    )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 6px', fontSize: 10, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <div style={{ flex: 1, height: 1, background: 'var(--color-border)' }} />
+                  <span>OR PASTE CERTIFICATE URL</span>
+                  <div style={{ flex: 1, height: 1, background: 'var(--color-border)' }} />
+                </div>
 
-                    {proofFileError && (
-                      <div style={{ marginTop: 8, fontSize: 12, color: '#dc2626', fontWeight: 500 }}>
-                        {proofFileError}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div>
-                    <input
-                      className="form-input"
-                      type="url"
-                      value={form.proof_url}
-                      onChange={e => setForm(f => ({ ...f, proof_url: e.target.value }))}
-                      placeholder="https://drive.google.com/... or certificate link"
-                    />
-                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
-                      Provide a Google Drive, certificate link, or verification URL for the admin to inspect before approving.
-                    </span>
-                  </div>
-                )}
+                <input 
+                  className="form-input" 
+                  type="text" 
+                  value={form.proof_url} 
+                  onChange={e => { setForm(f => ({ ...f, proof_url: e.target.value })); if (uploadedFileName) setUploadedFileName(''); }} 
+                  placeholder="https://drive.google.com/... or certificate link" 
+                />
               </div>
 
               <div className="alert alert-info" style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
@@ -757,49 +641,19 @@ export default function Profile() {
               </div>
 
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-                <button type="button" className="btn btn-secondary" onClick={() => setShowAddModal(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary" disabled={submittingAch}>
-                  {submittingAch ? 'Submitting...' : 'Add Achievement'}
+                <button type="button" className="btn btn-secondary" onClick={() => setShowAddModal(false)} disabled={submitting}>Cancel</button>
+                <button 
+                  type="submit" 
+                  className="btn btn-primary"
+                  disabled={submitting || uploadingFile}
+                >
+                  {submitting ? 'Adding...' : uploadingFile ? 'Uploading proof...' : 'Add Achievement'}
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
-
-      {/* Connect Platform Modal */}
-      <ConnectPlatformModal
-        isOpen={showConnectModal}
-        onClose={() => setShowConnectModal(false)}
-        userId={id}
-        initialPlatform={defaultPlatformToConnect}
-        onSuccess={() => {
-          fetchPlatforms();
-          fetchData();
-        }}
-      />
-
-      {/* Verification Modal */}
-      {verificationTarget && (
-        <VerificationModal
-          platform={verificationTarget.platform}
-          connection={verificationTarget.connection}
-          open={Boolean(verificationTarget)}
-          onOpenChange={(isOpen) => !isOpen && setVerificationTarget(null)}
-          onSuccess={() => {
-            fetchPlatforms();
-            fetchData();
-          }}
-        />
-      )}
-
-      {/* Score Breakdown Modal */}
-      <ScoreBreakdownModal
-        isOpen={showBreakdownModal}
-        onClose={() => setShowBreakdownModal(false)}
-        profile={platformData.competitive_profile}
-        platforms={platformData.platforms}
-      />
 
       {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
 

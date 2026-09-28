@@ -1,22 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import path from 'path'
 
 export default defineConfig({
   plugins: [react()],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
-  },
   server: {
     port: 5173,
-    cors: true,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:5001',
-        changeOrigin: true,
-      },
-    },
-  },
+    // ✅ Fixed: Remove proxy to allow Vite to serve frontend properly
+    // The backend will still serve API endpoints via /api paths
+    cors: true
+  }
 })

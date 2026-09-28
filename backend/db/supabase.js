@@ -2,7 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const rawUrl = process.env.SUPABASE_URL;
-const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY;
 
 const supabaseUrl = (rawUrl && rawUrl.startsWith('http')) ? rawUrl : 'https://placeholder.supabase.co';
 const supabaseKey = (rawKey && !rawKey.startsWith('your_')) ? rawKey : 'placeholder_key';
@@ -103,23 +103,16 @@ async function getUserWithScore(id) {
 
 // ─── getAdminScope ────────────────────────────────────────────────────────────
 // Identifies if user is full admin/HOD or restricted faculty advisor
-const scopeCache = new Map();
-
 async function getAdminScope(userId, role) {
   if (role === 'admin') return { hasFullAccess: true };
   if (role === 'faculty') {
-    const cached = scopeCache.get(userId);
-    if (cached && Date.now() < cached.expiry) return cached.val;
-
-    const { data } = await supabase.from('faculty').select('designation, advising_class, advising_batch').eq('user_id', userId).maybeSingle();
-    const isHod = data?.designation?.toUpperCase() === 'HOD';
-    const val = { 
-      hasFullAccess: isHod, 
+    const { data } = await supabase.from('faculty').select('designation, advising_class, advising_batch').eq('user_id', userId).single();
+    if (data?.designation?.toUpperCase() === 'HOD') return { hasFullAccess: true };
+    return { 
+      hasFullAccess: false, 
       advisingClass: data?.advising_class || null, 
       advisingBatch: data?.advising_batch || null 
     };
-    scopeCache.set(userId, { val, expiry: Date.now() + 60000 });
-    return val;
   }
   return { hasFullAccess: false };
 }

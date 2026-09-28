@@ -4,6 +4,10 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { supabase } = require('../db/supabase');
 
+// Precomputed dummy hash for timing-attack mitigation on non-existent accounts
+// Cost factor 10 matching standard user password hash, does not correspond to any valid account
+const DUMMY_HASH = bcrypt.hashSync('inceptron_dummy_password_protection_hash_2026', 10);
+
 // ─── POST /api/auth/register ──────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   const { name, roll_no, year, class: cls, email, password, github, linkedin, bio } = req.body;
@@ -31,7 +35,7 @@ router.post('/register', async (req, res) => {
     .single();
 
   if (userErr || !newUser) {
-    console.error(userErr);
+    console.error('Account creation request failed');
     return res.status(500).json({ error: 'Failed to create account.' });
   }
 
@@ -50,6 +54,7 @@ router.post('/register', async (req, res) => {
   if (profileErr) {
     // Rollback: delete the user
     await supabase.from('users').delete().eq('id', newUser.id);
+    console.error('Profile creation request failed');
     return res.status(500).json({ error: 'Failed to create profile.' });
   }
 
@@ -70,29 +75,38 @@ router.post('/register', async (req, res) => {
   });
 });
 
-// ─── POST /api/auth/login ─────────────────────────────────────────────────────
-router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Identifier and password required.' });
+const { loginIpLimiter, loginIdentifierLimiter } = require('../middleware/rateLimiter');
 
-  const identifier = email.trim();
-  console.log(`🔍 Attempting login for identifier: ${identifier}`);
+// ─── POST /api/auth/login ─────────────────────────────────────────────────────
+router.post('/login', loginIpLimiter, loginIdentifierLimiter, async (req, res) => {
+  const { email, identifier: reqId, roll_no, reg_no, username, password } = req.body;
+  const rawIdentifier = email || reqId || roll_no || reg_no || username;
+  if (!rawIdentifier || !password) return res.status(400).json({ error: 'Identifier and password required.' });
+
+  const identifier = String(rawIdentifier).trim();
+  if (identifier.length > 256) {
+    return res.status(400).json({ error: 'Identifier exceeds maximum allowed length of 256 characters.' });
+  }
+  console.log('Login attempt received');
+
+  const findUserWithFallback = async (queryFn) => {
+    let { data, error } = await queryFn(supabase.from('users').select('id, email, password_hash, role, must_change_password')).maybeSingle();
+    if (error && (error.code === '42703' || error.code === 'PGRST204' || error.message?.includes('must_change_password'))) {
+      const fallback = await queryFn(supabase.from('users').select('id, email, password_hash, role')).maybeSingle();
+      data = fallback.data;
+    }
+    return data;
+  };
 
   let authUser = null;
 
   // 1. Try to find by email directly in 'users' table
-  const { data: byEmail } = await supabase
-    .from('users')
-    .select('id, email, password_hash, role')
-    .ilike('email', identifier.toLowerCase())
-    .maybeSingle();
+  const byEmail = await findUserWithFallback(q => q.ilike('email', identifier.toLowerCase()));
 
   if (byEmail) {
-    console.log(`✅ Found user by email: ${byEmail.email}`);
     authUser = byEmail;
   } else {
     // 2. Try to find by roll_no in 'students' table
-    console.log(`Searching for roll_no: ${identifier.toUpperCase()}`);
     const { data: byRollNo } = await supabase
       .from('students')
       .select('user_id')
@@ -100,44 +114,32 @@ router.post('/login', async (req, res) => {
       .maybeSingle();
 
     if (byRollNo) {
-      console.log(`✅ Found user by roll_no, user_id: ${byRollNo.user_id}`);
-      const { data: userById } = await supabase
-        .from('users')
-        .select('id, email, password_hash, role')
-        .eq('id', byRollNo.user_id)
-        .maybeSingle();
-      authUser = userById;
+      authUser = await findUserWithFallback(q => q.eq('id', byRollNo.user_id));
     } else {
       // 3. Try to find by reg_no in 'students' table
-      console.log(`Searching for reg_no: ${identifier}`);
       const { data: byRegNo } = await supabase
         .from('students')
         .select('user_id')
-        .eq('reg_no', identifier)
+        .ilike('reg_no', identifier)
         .maybeSingle();
 
       if (byRegNo) {
-        console.log(`✅ Found user by reg_no, user_id: ${byRegNo.user_id}`);
-        const { data: userById } = await supabase
-          .from('users')
-          .select('id, email, password_hash, role')
-          .eq('id', byRegNo.user_id)
-          .maybeSingle();
-        authUser = userById;
+        authUser = await findUserWithFallback(q => q.eq('id', byRegNo.user_id));
       }
     }
   }
 
   if (!authUser) {
-    console.warn(`❌ No user found for: ${identifier}`);
-    return res.status(404).json({ error: 'No account found with this email, roll number, or register number.' });
+    console.warn('Login failed: user not found');
+    bcrypt.compareSync(password, DUMMY_HASH);
+    return res.status(401).json({ error: 'Invalid identifier or password.' });
   }
 
   if (!bcrypt.compareSync(password, authUser.password_hash)) {
-    console.warn(`❌ Incorrect password for: ${identifier}`);
-    return res.status(401).json({ error: 'Incorrect password.' });
+    console.warn('Login failed: incorrect password');
+    return res.status(401).json({ error: 'Invalid identifier or password.' });
   }
-  console.log(`✨ Login successful for: ${authUser.email}`);
+  console.log('Login successful');
 
   // Fetch profile based on role
   let profile = {};
@@ -166,6 +168,7 @@ router.post('/login', async (req, res) => {
       email: authUser.email,
       role: authUser.role,
       is_admin: authUser.role !== 'student',
+      must_change_password: Boolean(authUser.must_change_password),
       ...profile,
     },
   });

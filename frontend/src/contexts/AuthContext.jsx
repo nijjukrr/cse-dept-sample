@@ -27,12 +27,6 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     localStorage.removeItem('SIET_token');
     localStorage.removeItem('SIET_user');
-    try {
-      sessionStorage.removeItem('admin_overview_students');
-      sessionStorage.removeItem('admin_managed_students');
-      sessionStorage.removeItem('admin_faculties');
-      sessionStorage.removeItem('admin_announcements');
-    } catch {}
     setUser(null);
   }, []);
 
@@ -45,34 +39,23 @@ export function AuthProvider({ children }) {
     } catch {}
   }, [user]);
 
-  useEffect(() => {
-    if (!user?.id) return;
-    const handleUpdate = () => {
-      client.get(`/users/${user.id}`).then(({ data }) => {
-        localStorage.setItem('SIET_user', JSON.stringify(data));
-        setUser(data);
-      }).catch(() => {});
-    };
-
-    window.addEventListener('scoreUpdated', handleUpdate);
-    window.addEventListener('pendingUpdated', handleUpdate);
-    return () => {
-      window.removeEventListener('scoreUpdated', handleUpdate);
-      window.removeEventListener('pendingUpdated', handleUpdate);
-    };
-  }, [user?.id]);
-
-  const isAdmin = Boolean(
-    user &&
-    (
-      user.is_admin ||
-      user.role === 'admin' ||
-      user.role === 'faculty'
-    )
-  );
+  const updateUserStats = useCallback(({ score, achievement_count }) => {
+    setUser(prev => {
+      if (!prev) return prev;
+      const updated = {
+        ...prev,
+        ...(score !== undefined ? { score } : {}),
+        ...(achievement_count !== undefined ? { achievement_count } : {})
+      };
+      try {
+        localStorage.setItem('SIET_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isAdmin, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, login, register, logout, refreshUser, updateUserStats }}>
       {children}
     </AuthContext.Provider>
   );
