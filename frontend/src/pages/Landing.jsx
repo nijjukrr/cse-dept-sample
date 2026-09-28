@@ -1,14 +1,14 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import client from '../api/client';
 import ScoreBadge from '../components/ScoreBadge';
 import { useAuth } from '../contexts/AuthContext';
-import { 
-  Users, Award, Trophy, Briefcase, UsersRound, Star, Zap, BookOpen, 
-  Rocket, Medal, Target, Megaphone, ChevronLeft, ChevronRight, Sparkles,
-  ZoomIn, X, Terminal
-} from 'lucide-react';
-import { LogosCarousel } from '@/components/ui/LogosCarousel';
+import { useTheme } from '../contexts/ThemeContext';
+import AnnouncementsFeed from '../components/AnnouncementsFeed';
+import AchieversCarousel from '../components/ui/achievers-carousel';
+import MarqueeSection from '../components/ui/marquee-section';
+import Hero360 from '../components/Hero360';
+import { Users, Award, Trophy, Briefcase, Star, Zap, BookOpen, Rocket, Medal, Target } from 'lucide-react';
 
 const RANK_ICONS = [
   <Medal size={18} color="#B45309" strokeWidth={2.5} style={{ display: 'inline' }} />,
@@ -46,63 +46,296 @@ function AnimatedNumber({ target, duration = 1400 }) {
 }
 
 function AchievementCarousel({ topStudents }) {
-  const [current, setCurrent] = useState(0);
-
-  useEffect(() => {
-    if (!topStudents.length) return;
-    const id = setInterval(() => setCurrent(c => (c + 1) % topStudents.length), 4000);
-    return () => clearInterval(id);
-  }, [topStudents.length]);
-
-  if (!topStudents.length) return null;
-  const student = topStudents[current];
-
   return (
     <div className="lp-carousel">
-      <div className="lp-carousel-card animate-fadeIn" key={current}>
-        <div className="lp-carousel-rank">#{current + 1}</div>
-        <div className="lp-carousel-avatar">{student.name[0]}</div>
-        <div className="lp-carousel-name">{student.name}</div>
-        <div className="lp-carousel-meta">{student.class} · Year {student.year}</div>
-        {student.top_achievement && (
-          <div className="lp-carousel-ach">{student.top_achievement}</div>
-        )}
-        <ScoreBadge score={student.score} size="md" />
-        <Link to={`/profile/${student.id}`} className="btn btn-secondary btn-sm" style={{ marginTop: 12, width: '100%', justifyContent: 'center' }}>
-          View Profile →
-        </Link>
-      </div>
-      <div className="lp-dots">
-        {topStudents.map((_, i) => (
-          <button key={i} className={`lp-dot ${i === current ? 'active' : ''}`} onClick={() => setCurrent(i)} />
-        ))}
-      </div>
+      <AchieversCarousel achievers={topStudents} />
+    </div>
+  );
+}
+
+const TOTAL_FRAMES = 120;
+const ROTATION_SENSITIVITY = 0.14;
+
+function HeroInteractiveVideo({ videoSrc, fallbackImgSrc, theme }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+
+  const [isHovered, setIsHovered] = useState(false);
+  const [framesLoaded, setFramesLoaded] = useState(false);
+
+  const framesRef = useRef([]);
+  const isHoveringRef = useRef(false);
+  const targetFrameRef = useRef(0);
+  const displayFrameRef = useRef(0);
+  const lastXRef = useRef(null);
+  const lastDrawnFrameRef = useRef(-1);
+  const animFrameRef = useRef(null);
+
+  const themeKey = theme === 'dark' ? 'dark' : 'light';
+
+  useEffect(() => {
+    let isCancelled = false;
+    setFramesLoaded(false);
+    framesRef.current = [];
+
+    const loadedImages = [];
+    let count = 0;
+
+    for (let i = 0; i < TOTAL_FRAMES; i++) {
+      const img = new Image();
+      const numStr = String(i).padStart(3, '0');
+      img.src = `/hero-frames/${themeKey}/frame-${numStr}.webp`;
+      img.onload = () => {
+        if (isCancelled) return;
+        count++;
+        if (count >= TOTAL_FRAMES) {
+          framesRef.current = loadedImages;
+          setFramesLoaded(true);
+        }
+      };
+      loadedImages.push(img);
+    }
+
+    return () => {
+      isCancelled = true;
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+    };
+  }, [themeKey]);
+
+  const drawFrameToCanvas = useCallback((frameIdx) => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    const frames = framesRef.current;
+
+    if (!canvas || !container || !frames || frames.length === 0) return;
+
+    const img = frames[frameIdx % TOTAL_FRAMES];
+    if (!img || !img.complete) return;
+
+    const rect = container.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const targetW = Math.round(rect.width * dpr);
+    const targetH = Math.round(rect.height * dpr);
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, targetW, targetH);
+
+    const imgAspect = img.width / img.height;
+    const containerAspect = rect.width / rect.height;
+
+    let drawW, drawH, drawX, drawY;
+    if (containerAspect > imgAspect) {
+      drawH = targetH;
+      drawW = targetH * imgAspect;
+      drawX = (targetW - drawW) / 2;
+      drawY = 0;
+    } else {
+      drawW = targetW;
+      drawH = targetW / imgAspect;
+      drawX = 0;
+      drawY = (targetH - drawH) / 2;
+    }
+
+    ctx.drawImage(img, drawX, drawY, drawW, drawH);
+    lastDrawnFrameRef.current = frameIdx % TOTAL_FRAMES;
+  }, []);
+
+  const loop = useCallback(() => {
+    if (!isHoveringRef.current) {
+      animFrameRef.current = null;
+      return;
+    }
+
+    let target = targetFrameRef.current;
+    target = ((target % TOTAL_FRAMES) + TOTAL_FRAMES) % TOTAL_FRAMES;
+
+    let currentDisplay = displayFrameRef.current;
+
+    let difference = target - currentDisplay;
+    if (difference > TOTAL_FRAMES / 2) difference -= TOTAL_FRAMES;
+    if (difference < -TOTAL_FRAMES / 2) difference += TOTAL_FRAMES;
+
+    if (Math.abs(difference) > 0.01) {
+      currentDisplay += difference * 0.14;
+      currentDisplay = ((currentDisplay % TOTAL_FRAMES) + TOTAL_FRAMES) % TOTAL_FRAMES;
+      displayFrameRef.current = currentDisplay;
+    }
+
+    const roundedFrame = Math.round(currentDisplay) % TOTAL_FRAMES;
+    if (roundedFrame !== lastDrawnFrameRef.current) {
+      drawFrameToCanvas(roundedFrame);
+    }
+
+    animFrameRef.current = requestAnimationFrame(loop);
+  }, [drawFrameToCanvas]);
+
+  const handlePointerEnter = (e) => {
+    if (e.pointerType === 'touch' || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)) {
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video || !framesLoaded || framesRef.current.length < TOTAL_FRAMES) return;
+
+    isHoveringRef.current = true;
+    lastXRef.current = e.clientX;
+
+    video.pause();
+
+    let startRatio = 0;
+    if (video.readyState >= 1 && Number.isFinite(video.duration) && video.duration > 0) {
+      startRatio = video.currentTime / video.duration;
+    }
+    const startFrame = Math.floor(startRatio * TOTAL_FRAMES) % TOTAL_FRAMES;
+
+    targetFrameRef.current = startFrame;
+    displayFrameRef.current = startFrame;
+
+    drawFrameToCanvas(startFrame);
+    setIsHovered(true);
+
+    if (!animFrameRef.current) {
+      animFrameRef.current = requestAnimationFrame(loop);
+    }
+  };
+
+  const handlePointerMove = (e) => {
+    if (!isHoveringRef.current || !containerRef.current) return;
+
+    if (lastXRef.current !== null) {
+      const deltaX = e.clientX - lastXRef.current;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width > 0) {
+        const deltaFrames = (deltaX / rect.width) * (TOTAL_FRAMES * ROTATION_SENSITIVITY * 5);
+        targetFrameRef.current += deltaFrames;
+      }
+    }
+    lastXRef.current = e.clientX;
+
+    if (!animFrameRef.current) {
+      animFrameRef.current = requestAnimationFrame(loop);
+    }
+  };
+
+  const handlePointerLeave = () => {
+    isHoveringRef.current = false;
+    lastXRef.current = null;
+    setIsHovered(false);
+
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+
+    const video = videoRef.current;
+    if (video && video.readyState >= 1 && Number.isFinite(video.duration) && video.duration > 0) {
+      const finalRatio = (Math.round(displayFrameRef.current) % TOTAL_FRAMES) / TOTAL_FRAMES;
+      video.currentTime = finalRatio * video.duration;
+      video.play().catch(() => {});
+    }
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className={`hero-video-wrapper ${isHovered ? 'is-hovered' : ''}`}
+      onPointerEnter={handlePointerEnter}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
+    >
+      <video
+        key={videoSrc}
+        ref={videoRef}
+        className={`hero-logo-video ${isHovered && framesLoaded ? 'hidden-layer' : ''}`}
+        autoPlay
+        loop
+        muted
+        playsInline
+        preload="auto"
+        disablePictureInPicture
+        disableRemotePlayback
+        controls={false}
+        controlsList="nodownload noplaybackrate noremoteplayback"
+        onContextMenu={(e) => e.preventDefault()}
+        draggable={false}
+      >
+        <source src={videoSrc} type="video/mp4" />
+        <img src={fallbackImgSrc} alt="Inceptron Logo" className="lp-hero-logo-img" draggable={false} />
+      </video>
+      <canvas
+        ref={canvasRef}
+        className={`hero-frame-canvas ${isHovered && framesLoaded ? 'visible-layer' : ''}`}
+        onContextMenu={(e) => e.preventDefault()}
+      />
     </div>
   );
 }
 
 export default function Landing() {
   const { user } = useAuth();
-  const [stats, setStats] = useState({ totalStudents: 0, totalAchievements: 0, totalHackathonWins: 0, totalInternships: 0, activeTeams: 0 });
+  const { theme } = useTheme();
+  const videoSrc = theme === 'dark' ? '/videos/darkmain.mp4' : '/videos/light (2).mp4';
+  const fallbackImgSrc = theme === 'dark' ? '/dark.png?v=2' : '/inceptron-logo.png?v=2';
+  const [stats, setStats] = useState({ totalStudents: 0, totalAchievements: 0, totalHackathonWins: 0, totalInternships: 0 });
   const [topStudents, setTopStudents] = useState([]);
-  const [announcements, setAnnouncements] = useState([]);
-  const [activeNewsIdx, setActiveNewsIdx] = useState(0);
-  const [previewImage, setPreviewImage] = useState(null);
 
   useEffect(() => {
-    // Fetch active announcements for news feed
-    client.get('/announcements/active').then(res => {
-      setAnnouncements(res.data || []);
-    }).catch(() => {});
-
+    if (!user) return;
     Promise.all([
-      client.get('/leaderboard/stats').catch(() => ({ data: {} })),
-      client.get('/leaderboard/top').catch(() => ({ data: [] })),
+      client.get('/leaderboard/stats'),
+      client.get('/leaderboard/top'),
     ]).then(([s, t]) => {
-      if (s.data) setStats(s.data);
-      if (t.data) setTopStudents(t.data);
+      setStats(s.data);
+      setTopStudents(t.data);
     });
   }, [user]);
+
+  if (!user) {
+    return (
+      <div className="lp">
+        <section className="lp-hero" style={{ padding: '40px 0', minHeight: 'calc(100vh - 84px)', display: 'flex', alignItems: 'center' }}>
+          <div className="container">
+            <div className="lp-hero-inner animate-fadeInUp">
+              <div className="lp-hero-logo-col">
+                <HeroInteractiveVideo videoSrc={videoSrc} fallbackImgSrc={fallbackImgSrc} theme={theme} />
+              </div>
+              <div className="lp-hero-text">
+                <div className="lp-pill">
+                  <span className="lp-pill-dot" />
+                  Sri Shakthi Institute of Engineering and Technology, Coimbatore
+                </div>
+                <h1 className="lp-h1">
+                  Inceptron<br />
+                  <span className="lp-h1-accent">Achievement Hub</span>
+                </h1>
+                <p className="lp-sub">
+                  The exclusive achievement hub for SIET CSE Department. Track your progress, discover opportunities, and climb the leaderboard.
+                </p>
+                <div className="lp-ctas">
+                  <Link to="/login" className="btn btn-primary btn-lg" style={{ padding: '14px 28px' }}>
+                    <Rocket size={18} /> Sign In to Portal →
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="lp">
@@ -112,168 +345,27 @@ export default function Landing() {
         <div className="container">
           <div className="lp-hero-inner animate-fadeInUp">
             <div className="lp-hero-logo-col">
-              <img src="/inceptron-logo.png" alt="Inceptron Logo" className="lp-hero-logo-img" />
+              <Hero360 theme={theme} />
             </div>
             <div className="lp-hero-text">
               <div className="lp-pill">
                 <span className="lp-pill-dot" />
-                Sri Shakthi Institute of Engineering and Technology · CSE Department
+                Sri Shakthi Institute of Engineering and Technology, Coimbatore
               </div>
               <h1 className="lp-h1">
-                SSIET CSE<br />
-                <span className="lp-h1-accent">Competitive Index</span>
+                Inceptron<br />
+                <span className="lp-h1-accent">Achievement Hub</span>
               </h1>
               <p className="lp-sub">
-                One profile. Every platform. One department leaderboard. Connecting <strong>GitHub</strong>, <strong>LeetCode</strong>, <strong>Codeforces</strong>, <strong>HackerRank</strong>, <strong>CodeChef</strong>, and <strong>GFG</strong> into a transparent, normalized technical index.
+                Track hackathons, internships, projects and courses. Climb the leaderboard.
+                Form your team. Build your career at <strong>SIET</strong>.
               </p>
               <div className="lp-ctas">
-                <Link to="/leaderboard" className="btn btn-primary btn-lg"><Trophy size={18} /> Department Leaderboard</Link>
-                {user ? (
-                  <Link to={`/profile/${user.id}`} className="btn btn-secondary btn-lg"><Terminal size={18} /> My Competitive Profile</Link>
-                ) : (
-                  <Link to="/login" className="btn btn-secondary btn-lg"><Rocket size={18} /> Sign In to Portal</Link>
-                )}
+                <a href="http://110.172.151.102/" className="btn btn-primary btn-lg"><Rocket size={18} /> Sign In to Portal</a>
+                <Link to="/leaderboard" className="btn btn-secondary btn-lg"><Trophy size={18} /> Leaderboard</Link>
               </div>
             </div>
           </div>
-
-          <div style={{ marginTop: 32 }}>
-            <LogosCarousel />
-          </div>
-        </div>
-      </section>
-
-      {/* ── Latest News & Announcements ── */}
-      <section className="lp-section news-section" style={{ paddingTop: 20, paddingBottom: 20 }}>
-        <div className="container">
-          {(() => {
-            const PAGE_SIZE = 3;
-            const totalPages = Math.ceil(announcements.length / PAGE_SIZE) || 1;
-            const currentPage = Math.min(Math.max(1, activeNewsIdx + 1), totalPages);
-            const visibleNews = announcements.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
-
-            return (
-              <>
-                <div className="section-header" style={{ marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
-                  <div>
-                    <h2 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 'clamp(22px, 3.2vw, 28px)' }}>
-                      <Megaphone size={26} className="text-gradient" /> Department News
-                    </h2>
-                    <p className="section-subtitle">Hackathon winners, achievements, placements and important department updates</p>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                    {user?.is_admin && (
-                      <Link to="/admin?tab=post-notify" className="btn btn-primary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 16px', fontWeight: 700 }}>
-                        <Megaphone size={15} /> Manage Post & Notify →
-                      </Link>
-                    )}
-                    {totalPages > 1 && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          disabled={currentPage <= 1}
-                          onClick={() => setActiveNewsIdx(currentPage - 2)}
-                          style={{ padding: '6px 14px' }}
-                        >
-                          <ChevronLeft size={16} /> Prev
-                        </button>
-                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-muted)', minWidth: 60, textAlign: 'center' }}>
-                          {currentPage} / {totalPages}
-                        </span>
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          disabled={currentPage >= totalPages}
-                          onClick={() => setActiveNewsIdx(currentPage)}
-                          style={{ padding: '6px 14px' }}
-                        >
-                          Next <ChevronRight size={16} />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {visibleNews.length === 0 ? (
-                  <div className="news-card card animate-fadeIn" style={{ padding: '36px 40px' }}>
-                    <div className="news-meta" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-                      <span className="badge badge-gold" style={{ fontSize: 12 }}>
-                        Department Bulletin
-                      </span>
-                      <span className="news-date-text">
-                        SIET CSE Department
-                      </span>
-                    </div>
-
-                    <h3 className="news-headline">Welcome to Inceptron Department News! 📢</h3>
-                    <p className="news-body-text" style={{ maxWidth: 800, marginBottom: user?.is_admin ? 16 : 0 }}>
-                      This section displays real-time hackathon winner announcements, internship highlights, placement updates, and important department notifications published by faculty and administrators.
-                    </p>
-
-                    {user?.is_admin && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16 }}>
-                        <Link to="/admin?tab=post-notify" className="btn btn-primary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                          <Megaphone size={14} /> Go to Post & Notify Management →
-                        </Link>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                    {visibleNews.map(news => {
-                      const hasUploadedImage = Boolean(news.image_url && news.image_url.trim());
-                      const displayImg = hasUploadedImage ? news.image_url : '/inceptron-logo.png';
-                      const isImportant = news.category === 'Important';
-
-                      return (
-                        <div className={`news-card card animate-fadeIn ${isImportant ? 'news-card-important' : ''}`} key={news.id}>
-                          <div className="news-grid">
-                            {/* Left Column: Image with Automatic CSE Inceptron Logo Fallback & Click Lightbox */}
-                            <div className="news-left-col" style={isImportant ? { background: '#FEF2F2' } : {}}>
-                              <div
-                                className="news-image-wrapper"
-                                onClick={() => setPreviewImage({ url: displayImg, title: news.title, category: news.category })}
-                                title="Click to open full photo view"
-                              >
-                                <img
-                                  src={displayImg}
-                                  alt={news.title}
-                                  className={hasUploadedImage ? 'news-img' : 'news-img-logo-contain'}
-                                  onError={(e) => { e.target.src = '/inceptron-logo.png'; }}
-                                />
-                                <div className="news-category-badge">
-                                  <span className={`badge ${isImportant ? 'badge-important' : 'badge-gold'}`} style={{ fontSize: 12, boxShadow: 'var(--shadow-sm)' }}>
-                                    {isImportant ? '🚨 Important' : (news.category || 'General')}
-                                  </span>
-                                </div>
-                                <span className="news-zoom-hint">
-                                  <ZoomIn size={14} /> View Full Photo
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Right Column: News Details */}
-                            <div className="news-right-col">
-                              <div className="news-meta">
-                                <span style={{ fontSize: 13, color: isImportant ? '#DC2626' : 'var(--color-green)', fontWeight: 700 }}>
-                                  {isImportant ? '🚨 Urgent Department Notice' : 'Official Announcement'}
-                                </span>
-                                <span className="news-date-text" style={isImportant ? { color: '#B91C1C' } : {}}>
-                                  {new Date(news.created_at).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })}
-                                </span>
-                              </div>
-
-                              <h3 className="news-headline" style={isImportant ? { color: '#DC2626' } : {}}>{news.title}</h3>
-                              <p className="news-body-text" style={isImportant ? { color: '#991B1B' } : {}}>{news.content}</p>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            );
-          })()}
         </div>
       </section>
 
@@ -285,7 +377,6 @@ export default function Landing() {
             { v: stats.totalAchievements,  l: 'Achievements',   i: <Award size={28} /> },
             { v: stats.totalHackathonWins, l: 'Hackathon Wins', i: <Trophy size={28} /> },
             { v: stats.totalInternships,   l: 'Internships',    i: <Briefcase size={28} /> },
-            { v: stats.activeTeams,        l: 'Active Teams',   i: <UsersRound size={28} /> },
           ].map((s, i) => (
             <div key={i} className="stat-card card animate-fadeInUp" style={{ animationDelay: `${i * 0.06}s` }}>
               <div className="stat-icon">{s.i}</div>
@@ -296,8 +387,11 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* ── Department Announcements & Notifications ── */}
+      <AnnouncementsFeed />
+
       {/* ── Top Achievers ─────────────────────── */}
-      <section className="lp-section">
+      <section className="lp-section lp-achievers-section">
         <div className="container">
           <div className="section-header">
             <div>
@@ -307,7 +401,9 @@ export default function Landing() {
             <Link to="/leaderboard" className="btn btn-secondary btn-sm">View All →</Link>
           </div>
           <div className="lp-achievers-layout">
-            <AchievementCarousel topStudents={topStudents} />
+            <div className="lp-carousel">
+              <AchieversCarousel achievers={topStudents} />
+            </div>
             <div className="lp-podium-list">
               {topStudents.map((s, i) => (
                 <Link key={s.id} to={`/profile/${s.id}`} className="lp-podium-row card card-hover animate-fadeInUp" style={{ animationDelay: `${i * 0.06}s` }}>
@@ -326,7 +422,7 @@ export default function Landing() {
       </section>
 
       {/* ── Scoring ───────────────────────────── */}
-      <section className="lp-section">
+      <section className="lp-section lp-scoring-section lp-section-alt">
         <div className="container">
           <div className="section-header" style={{ justifyContent: 'center', textAlign: 'center', flexDirection: 'column', gap: 0 }}>
             <h2 className="section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}><Award size={24} className="text-gradient" /> How Scoring Works</h2>
@@ -354,45 +450,107 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* ── Live From Inceptron Marquee Highlights ── */}
+      <MarqueeSection />
+
       <style>{`
         .lp { overflow-x: hidden; }
 
         /* ── Hero ── */
         .lp-hero {
-          background: #FFFFFF;
+          background: var(--hero-bg);
           border-bottom: 2px solid var(--border);
           padding: calc(var(--navbar-height) + 56px) 0 64px;
         }
         .lp-hero-inner {
-          display: flex;
+          display: grid;
+          grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
           align-items: center;
-          gap: 48px;
-          max-width: 860px;
+          gap: 32px;
+          max-width: 1280px;
           margin: 0 auto;
         }
         .lp-hero-logo-col {
-          flex: 0 0 360px;
+          display: flex;
+          align-items: center;
+          justify-content: flex-start;
+          position: relative;
+          margin-left: -50px;
+        }
+        @media (max-width: 1199px) {
+          .lp-hero-logo-col {
+            margin-left: -25px;
+          }
+        }
+        .hero-video-wrapper {
+          position: relative;
+          width: 100%;
+          max-width: clamp(440px, 46vw, 700px);
+          aspect-ratio: 1000 / 562;
           display: flex;
           align-items: center;
           justify-content: center;
+          cursor: grab;
+          user-select: none;
+          -webkit-user-drag: none;
+        }
+        .hero-logo-video,
+        .hero-frame-canvas {
+          width: 100%;
+          height: 100%;
+          display: block;
+          object-fit: contain;
+          object-position: center;
+          filter: drop-shadow(0 20px 40px rgba(0,0,0,0.15));
+          background: transparent;
+          mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, black 50%, transparent 95%);
+          -webkit-mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, black 50%, transparent 95%);
+          user-select: none;
+          -webkit-user-drag: none;
+          transition: opacity 0.15s ease;
+        }
+        .hero-frame-canvas {
+          position: absolute;
+          top: 0; left: 0;
+          pointer-events: none;
+          opacity: 0;
+        }
+        .hero-logo-video.hidden-layer {
+          opacity: 0;
+        }
+        .hero-frame-canvas.visible-layer {
+          opacity: 1;
         }
         .lp-hero-logo-img {
           width: 100%;
-          max-width: 340px;
+          max-width: clamp(440px, 46vw, 700px);
           height: auto;
           display: block;
-          filter: drop-shadow(0 20px 40px rgba(0,0,0,0.18));
-          transition: transform 0.3s ease;
+          object-fit: contain;
+          object-position: center;
+          filter: drop-shadow(0 20px 40px rgba(0,0,0,0.15));
+          background: transparent;
+          mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, black 50%, transparent 95%);
+          -webkit-mask-image: radial-gradient(ellipse 88% 88% at 50% 50%, black 50%, transparent 95%);
+          user-select: none;
+          -webkit-user-drag: none;
         }
-        .lp-hero-logo-img:hover {
-          transform: scale(1.04);
+        [data-theme="dark"] .hero-logo-video,
+        [data-theme="dark"] .hero-frame-canvas,
+        [data-theme="dark"] .lp-hero-logo-img {
+          mix-blend-mode: screen;
+        }
+        [data-theme="light"] .hero-logo-video,
+        [data-theme="light"] .hero-frame-canvas,
+        [data-theme="light"] .lp-hero-logo-img {
+          mix-blend-mode: normal;
         }
         .lp-hero-text {
           flex: 1;
         }
         @media (max-width: 768px) {
-          .lp-hero-inner { flex-direction: column; text-align: center; gap: 32px; }
-          .lp-hero-logo-col { flex: 0 0 180px; }
+          .lp-hero-inner { display: flex; flex-direction: column; text-align: center; gap: 32px; }
+          .lp-hero-logo-col { flex: 0 0 180px; margin-left: 0; justify-content: center; }
           .lp-ctas { justify-content: center; }
         }
 
@@ -465,7 +623,7 @@ export default function Landing() {
 
         /* ── Stats ── */
         .lp-stats { padding: 40px 0; background: var(--bg-primary); border-bottom: 2px solid var(--border); }
-        .lp-stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+        .lp-stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
         @media (max-width: 768px) { .lp-stats-grid { grid-template-columns: repeat(2, 1fr); } }
 
         /* ── Sections ── */
@@ -513,109 +671,26 @@ export default function Landing() {
         .lp-pm-meta { font-size: 12px; color: var(--color-text-muted); margin-top: 1px; }
         .lp-pm-score { font-size: 18px; font-weight: 900; color: var(--color-green); font-family: 'Space Grotesk', sans-serif; flex-shrink: 0; }
 
+        [data-theme="light"] .lp-carousel-card { background: var(--bg-card); border: 2px solid var(--border); border-top: 4px solid var(--color-green); }
+        [data-theme="light"] .lp-carousel-name { color: var(--color-text); }
+        [data-theme="light"] .lp-carousel-meta { color: var(--color-text-muted); }
+        [data-theme="light"] .lp-carousel-rank { color: var(--color-green); }
+        [data-theme="light"] .lp-podium-row { background: var(--bg-card); border: 1px solid var(--border); color: var(--color-text); }
+        [data-theme="light"] .lp-podium-row:hover { background: var(--green-50) !important; border-color: var(--color-green); box-shadow: 0 4px 14px var(--green-100); }
+        [data-theme="light"] .lp-podium-row.active, [data-theme="light"] .lp-podium-row.selected { background: var(--green-100) !important; border-color: var(--color-green); }
+        [data-theme="light"] .lp-pm-name { color: var(--color-text) !important; }
+        [data-theme="light"] .lp-pm-meta { color: var(--color-text-muted) !important; }
+        [data-theme="light"] .lp-pm-score { color: var(--color-green) !important; }
+
         /* ── Scoring ── */
         .lp-score-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 28px; }
         @media (max-width: 768px) { .lp-score-grid { grid-template-columns: 1fr 1fr; } }
         .lp-score-card { padding: 20px 16px; text-align: center; border-left: 4px solid var(--border); }
         .lp-score-icon { font-size: 28px; display: block; margin-bottom: 8px; }
+        .lp-score-title { font-size: 12px; color: var(--color-text-muted); margin-bottom: 8px; font-weight: 500; }
         .lp-score-pts { font-size: 24px; font-weight: 900; font-family: 'Space Grotesk', sans-serif; }
+
       `}</style>
-
-      {/* ── Photo Lightbox Modal ── */}
-      {previewImage && (
-        <div
-          className="modal-overlay animate-fadeIn"
-          onClick={() => setPreviewImage(null)}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.85)',
-            backdropFilter: 'blur(8px)',
-            zIndex: 9999,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 20
-          }}
-        >
-          <div
-            className="card animate-scaleIn"
-            onClick={e => e.stopPropagation()}
-            style={{
-              position: 'relative',
-              background: 'var(--bg-card)',
-              borderRadius: 'var(--radius-lg)',
-              padding: 24,
-              maxWidth: 620,
-              width: '100%',
-              boxShadow: 'var(--shadow-xl)',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              border: '1.5px solid var(--border)'
-            }}
-          >
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={() => setPreviewImage(null)}
-              style={{
-                position: 'absolute',
-                top: 14,
-                right: 14,
-                borderRadius: '50%',
-                width: 36,
-                height: 36,
-                padding: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: 'var(--bg-hover)',
-                color: 'var(--color-text)',
-                zIndex: 10
-              }}
-            >
-              <X size={20} />
-            </button>
-
-            <div
-              style={{
-                width: '100%',
-                height: 'min(500px, 60vh)',
-                overflow: 'hidden',
-                borderRadius: 'var(--radius-md)',
-                background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.06), rgba(168, 85, 247, 0.04))',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                border: '1px solid var(--border)',
-                padding: 12
-              }}
-            >
-              <img
-                src={previewImage.url}
-                alt={previewImage.title || 'Announcement Photo'}
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: '100%',
-                  objectFit: 'contain',
-                  borderRadius: 'var(--radius-sm)'
-                }}
-              />
-            </div>
-
-            {previewImage.title && (
-              <div style={{ marginTop: 16, textAlign: 'center', width: '100%' }}>
-                <span className="badge badge-gold" style={{ fontSize: 12, marginBottom: 6 }}>
-                  {previewImage.category || 'Announcement Photo'}
-                </span>
-                <h4 style={{ fontSize: 17, fontWeight: 800, color: 'var(--color-text)', marginTop: 4 }}>
-                  {previewImage.title}
-                </h4>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

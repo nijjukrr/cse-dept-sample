@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import ThemeSection from '../components/ThemeSection';
 
 export default function EditProfile() {
   const { user: authUser, refreshUser } = useAuth();
@@ -26,6 +27,8 @@ export default function EditProfile() {
     confirmPassword: ''
   });
 
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingPassword, setSavingPassword] = useState(false);
   const [toast, setToast] = useState(null);
 
   const showToast = (msg, type = 'success') => {
@@ -45,8 +48,8 @@ export default function EditProfile() {
           instagram: res.data.instagram || '',
           portfolio: res.data.portfolio || '',
           phone: res.data.phone || '',
-          phone_public: res.data.phone_public || false,
-          dob_public: res.data.dob_public || false
+          phone_public: Boolean(res.data.phone_public),
+          dob_public: Boolean(res.data.dob_public)
         });
       })
       .catch(err => {
@@ -58,6 +61,8 @@ export default function EditProfile() {
 
   const handleProfileSubmit = async (e) => {
     e.preventDefault();
+    if (savingProfile) return;
+    setSavingProfile(true);
     try {
       await client.put(`/users/${authUser.id}`, profileForm);
       showToast('Profile updated successfully!');
@@ -65,14 +70,21 @@ export default function EditProfile() {
       setTimeout(() => navigate(`/profile/${authUser.id}`), 1000);
     } catch (err) {
       showToast('Failed to update profile', 'error');
+    } finally {
+      setSavingProfile(false);
     }
   };
 
   const handlePasswordSubmit = async (e) => {
     e.preventDefault();
+    if (savingPassword) return;
     if (passwordForm.newPassword !== passwordForm.confirmPassword) {
       return showToast('New passwords do not match', 'error');
     }
+    if (passwordForm.newPassword.length < 8) {
+      return showToast('New password must be at least 8 characters long.', 'error');
+    }
+    setSavingPassword(true);
     try {
       await client.post(`/users/${authUser.id}/change-password`, {
         currentPassword: passwordForm.currentPassword,
@@ -82,6 +94,8 @@ export default function EditProfile() {
       setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
     } catch (err) {
       showToast(err.response?.data?.error || 'Failed to change password', 'error');
+    } finally {
+      setSavingPassword(false);
     }
   };
 
@@ -89,13 +103,17 @@ export default function EditProfile() {
 
   return (
     <div className="page-content">
-      <div className="container" style={{ maxWidth: '600px' }}>
+      <div className="container" style={{ maxWidth: '640px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
           <button className="btn btn-ghost" onClick={() => navigate(`/profile/${authUser.id}`)}>← Back</button>
           <h1 className="section-title">Edit Profile</h1>
         </div>
 
+        {/* Dedicated Theme & Color Section */}
+        <ThemeSection title="Theme & Color Customization" showPreview={true} />
+
         <div className="card" style={{ padding: '24px', marginBottom: '24px' }}>
+
           <h2 style={{ fontSize: '18px', marginBottom: '16px' }}>Public Details</h2>
           <form onSubmit={handleProfileSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             
@@ -204,7 +222,9 @@ export default function EditProfile() {
               </div>
             </div>
 
-            <button type="submit" className="btn btn-primary" style={{ alignSelf: 'flex-start', marginTop: '8px' }}>Save Profile Changes</button>
+            <button type="submit" className="btn btn-primary" disabled={savingProfile} style={{ alignSelf: 'flex-start', marginTop: '8px' }}>
+              {savingProfile ? 'Saving Changes...' : 'Save Profile Changes'}
+            </button>
           </form>
         </div>
 
@@ -228,6 +248,7 @@ export default function EditProfile() {
                 className="form-input" 
                 type="password" 
                 required
+                minLength={8}
                 value={passwordForm.newPassword}
                 onChange={e => setPasswordForm(prev => ({ ...prev, newPassword: e.target.value }))}
               />
@@ -239,12 +260,15 @@ export default function EditProfile() {
                 className="form-input" 
                 type="password" 
                 required
+                minLength={8}
                 value={passwordForm.confirmPassword}
                 onChange={e => setPasswordForm(prev => ({ ...prev, confirmPassword: e.target.value }))}
               />
             </div>
 
-            <button type="submit" className="btn btn-secondary" style={{ alignSelf: 'flex-start' }}>Update Password</button>
+            <button type="submit" className="btn btn-secondary" disabled={savingPassword} style={{ alignSelf: 'flex-start' }}>
+              {savingPassword ? 'Updating Password...' : 'Update Password'}
+            </button>
           </form>
         </div>
 

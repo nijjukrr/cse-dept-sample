@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import { useUndoableDelete } from '../contexts/UndoDeleteContext';
 import TeamCard from '../components/TeamCard';
 import ConfirmModal from '../components/ConfirmModal';
 
@@ -9,6 +10,7 @@ const TEAM_TYPES = ['hackathon', 'project', 'research'];
 
 export default function Teams() {
   const { user } = useAuth();
+  const { requestUndoableDelete } = useUndoableDelete();
   const [searchParams, setSearchParams] = useSearchParams();
   const [teams, setTeams] = useState([]);
   const [selectedTeam, setSelectedTeam] = useState(null);
@@ -117,43 +119,65 @@ export default function Teams() {
     }
   };
 
-  const [confirmModalData, setConfirmModalData] = useState(null);
+  const [confirmConfig, setConfirmConfig] = useState(null);
 
   const handleDecline = (mid) => {
-    setConfirmModalData({
-      title: 'Remove Member?',
-      message: 'Are you sure you want to remove this member from the team?',
-      confirmText: 'Remove Member',
+    setConfirmConfig({
+      title: 'Remove Member',
+      message: 'Are you sure you want to remove this member/invite?',
+      confirmText: 'Remove',
       onConfirm: async () => {
+        setConfirmConfig(null);
         try {
           await client.delete(`/teams/invites/${mid}`);
-          showToast('Member removed.');
+          showToast('Removed');
           openTeamDetail(selectedTeam.id);
           fetchTeams();
-        } catch {
-          showToast('Failed to remove member.', 'error');
+        } catch (err) {
+          showToast('Failed', 'error');
         }
       }
     });
   };
 
-  const handleDeleteTeam = (teamId, e) => {
+  const handleDeleteTeam = (teamId, e, teamName = 'this team') => {
     if (e) e.stopPropagation();
-    setConfirmModalData({
-      title: 'Delete Team?',
+    const targetTeam = teams.find(t => t.id === teamId) || selectedTeam;
+    const targetName = targetTeam?.name || teamName;
+
+    setConfirmConfig({
+      title: 'Delete Team',
+      itemName: targetName,
       message: 'Are you sure you want to delete this team? This action cannot be undone.',
-      confirmText: 'Delete Team',
-      onConfirm: async () => {
-        setTeams(prev => prev.filter(t => t.id !== teamId));
-        if (selectedTeam?.id === teamId) closeTeamDetail();
-        showToast('Team deleted successfully! 🗑️');
-        try {
-          await client.delete(`/teams/${teamId}`);
-          fetchTeams();
-        } catch (err) {
-          showToast(err.response?.data?.error || 'Failed to delete team', 'error');
-          fetchTeams();
-        }
+      confirmText: 'Delete',
+      onConfirm: () => {
+        setConfirmConfig(null);
+
+        requestUndoableDelete({
+          id: teamId,
+          type: 'Team',
+          label: targetName,
+          itemData: targetTeam,
+          onOptimisticRemove: () => {
+            setTeams(prev => prev.filter(t => t.id !== teamId));
+            if (selectedTeam?.id === teamId) closeTeamDetail();
+          },
+          onRestore: () => {
+            setTeams(prev => {
+              if (prev.some(t => t.id === teamId)) return prev;
+              return targetTeam ? [...prev, targetTeam] : prev;
+            });
+            fetchTeams();
+          },
+          onCommit: async () => {
+            await client.delete(`/teams/${teamId}`);
+            fetchTeams();
+          },
+          onFailure: (err) => {
+            showToast(err?.response?.data?.error || 'Failed to delete team', 'error');
+            fetchTeams();
+          }
+        });
       }
     });
   };
@@ -391,18 +415,18 @@ export default function Teams() {
         .create-team-form { display: flex; flex-direction: column; gap: 20px; padding: 20px 0; }
         .btn-block { width: 100%; border-radius: 12px; height: 48px; }
       `}</style>
-      {/* ── Custom Confirm Modal ── */}
-      <ConfirmModal
-        isOpen={Boolean(confirmModalData)}
-        onClose={() => setConfirmModalData(null)}
-        onConfirm={() => {
-          if (confirmModalData?.onConfirm) confirmModalData.onConfirm();
-        }}
-        title={confirmModalData?.title || 'Are you sure?'}
-        message={confirmModalData?.message || 'This action cannot be undone.'}
-        confirmText={confirmModalData?.confirmText || 'Confirm'}
-        type="danger"
-      />
+
+      {confirmConfig && (
+        <ConfirmModal
+          isOpen={Boolean(confirmConfig)}
+          title={confirmConfig.title || 'Confirm Action'}
+          itemName={confirmConfig.itemName}
+          message={confirmConfig.message}
+          confirmText={confirmConfig.confirmText || 'Confirm'}
+          onConfirm={confirmConfig.onConfirm}
+          onCancel={() => setConfirmConfig(null)}
+        />
+      )}
     </div>
   );
 }

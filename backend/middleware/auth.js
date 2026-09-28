@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
+const { supabase } = require('../db/supabase');
 
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
+  if (req.user) return next();
   const authHeader = req.headers['authorization'];
   if (!authHeader) return res.status(401).json({ error: 'No token provided' });
 
@@ -9,18 +11,70 @@ const authMiddleware = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    // backward compat: if old token has is_admin, derive role
-    if (decoded.is_admin !== undefined && !decoded.role) {
-      req.user.role = decoded.is_admin ? 'faculty' : 'student';
+    if (!decoded || !decoded.id) return res.status(401).json({ error: 'Invalid token payload' });
+
+    // Load current authorization state from database (prevents stale JWT scope vulnerabilities)
+    let { data: userRow, error: uErr } = await supabase
+      .from('users')
+      .select('id, email, role, must_change_password')
+      .eq('id', decoded.id)
+      .maybeSingle();
+
+    if (uErr && (uErr.code === '42703' || uErr.code === 'PGRST204' || uErr.message?.includes('must_change_password'))) {
+      const fallback = await supabase
+        .from('users')
+        .select('id, email, role')
+        .eq('id', decoded.id)
+        .maybeSingle();
+      userRow = fallback.data;
+      uErr = fallback.error;
     }
+
+    if (uErr || !userRow) {
+      return res.status(401).json({ error: 'Account no longer exists or authorization revoked' });
+    }
+
+    let extraScope = {};
+    if (userRow.role === 'student') {
+      const { data: sRow } = await supabase
+        .from('students')
+        .select('name, roll_no, class, batch')
+        .eq('user_id', userRow.id)
+        .maybeSingle();
+      extraScope = sRow || {};
+    } else {
+      const { data: fRow } = await supabase
+        .from('faculty')
+        .select('designation, department, advising_class, advising_batch, is_hod')
+        .eq('user_id', userRow.id)
+        .maybeSingle();
+
+      const isHod = Boolean(fRow?.is_hod || fRow?.designation?.toUpperCase() === 'HOD' || userRow.role === 'admin');
+      extraScope = {
+        designation: fRow?.designation || null,
+        department: fRow?.department || 'CSE',
+        advising_class: fRow?.advising_class || null,
+        advising_batch: fRow?.advising_batch || null,
+        is_hod: isHod
+      };
+    }
+
+    req.user = {
+      id: userRow.id,
+      email: userRow.email,
+      role: userRow.role,
+      is_admin: userRow.role !== 'student',
+      must_change_password: Boolean(userRow.must_change_password),
+      ...extraScope
+    };
+
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Token expired or invalid' });
   }
 };
 
-const optionalAuthMiddleware = (req, res, next) => {
+const optionalAuthMiddleware = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader) return next();
 
@@ -29,29 +83,78 @@ const optionalAuthMiddleware = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    if (decoded.is_admin !== undefined && !decoded.role) {
-      req.user.role = decoded.is_admin ? 'faculty' : 'student';
+    if (!decoded || !decoded.id) return next();
+
+    let { data: userRow, error: uErr } = await supabase
+      .from('users')
+      .select('id, email, role, must_change_password')
+      .eq('id', decoded.id)
+      .maybeSingle();
+
+    if (uErr && (uErr.code === '42703' || uErr.code === 'PGRST204' || uErr.message?.includes('must_change_password'))) {
+      const fallback = await supabase
+        .from('users')
+        .select('id, email, role')
+        .eq('id', decoded.id)
+        .maybeSingle();
+      userRow = fallback.data;
     }
+
+    if (!userRow) return next();
+
+    let extraScope = {};
+    if (userRow.role === 'student') {
+      const { data: sRow } = await supabase
+        .from('students')
+        .select('name, roll_no, class, batch')
+        .eq('user_id', userRow.id)
+        .maybeSingle();
+      extraScope = sRow || {};
+    } else {
+      const { data: fRow } = await supabase
+        .from('faculty')
+        .select('designation, department, advising_class, advising_batch, is_hod')
+        .eq('user_id', userRow.id)
+        .maybeSingle();
+
+      const isHod = Boolean(fRow?.is_hod || fRow?.designation?.toUpperCase() === 'HOD' || userRow.role === 'admin');
+      extraScope = {
+        designation: fRow?.designation || null,
+        department: fRow?.department || 'CSE',
+        advising_class: fRow?.advising_class || null,
+        advising_batch: fRow?.advising_batch || null,
+        is_hod: isHod
+      };
+    }
+
+    req.user = {
+      id: userRow.id,
+      email: userRow.email,
+      role: userRow.role,
+      is_admin: userRow.role !== 'student',
+      must_change_password: Boolean(userRow.must_change_password),
+      ...extraScope
+    };
+
     next();
   } catch (err) {
-    next(); // Just ignore invalid token for optional auth
+    next();
   }
 };
 
 const adminMiddleware = (req, res, next) => {
-  if (req.user?.role === 'student') {
-    return res.status(403).json({ error: 'Admin access required' });
+  const role = req.user?.role;
+  const isAdminFlag = req.user?.is_admin === true;
+  if (isAdminFlag || ['admin', 'faculty'].includes(role)) {
+    return next();
   }
-  next();
+  return res.status(403).json({ error: 'Admin access required' });
 };
 
 const hodMiddleware = (req, res, next) => {
-  // Only admin role or faculty with HOD designation
   if (!['admin', 'faculty'].includes(req.user?.role)) {
     return res.status(403).json({ error: 'HOD access required' });
   }
-  // For faculty, verify HOD designation
   if (req.user.role === 'faculty' && !req.user.is_hod) {
     return res.status(403).json({ error: 'HOD access required' });
   }
@@ -59,12 +162,10 @@ const hodMiddleware = (req, res, next) => {
 };
 
 const facultyAdvisorMiddleware = (req, res, next) => {
-  // Allow admin, HOD, and faculty advisors
   if (!['admin', 'faculty'].includes(req.user?.role)) {
     return res.status(403).json({ error: 'Faculty advisor access required' });
   }
-  // Faculty must have advising assignments
-  if (req.user.role === 'faculty') {
+  if (req.user.role === 'faculty' && !req.user.is_hod) {
     if (!req.user.advising_class || !req.user.advising_batch) {
       return res.status(403).json({ error: 'Not assigned as class advisor' });
     }
@@ -72,4 +173,18 @@ const facultyAdvisorMiddleware = (req, res, next) => {
   next();
 };
 
-module.exports = { authMiddleware, optionalAuthMiddleware, adminMiddleware, hodMiddleware, facultyAdvisorMiddleware };
+const strictAdminMiddleware = (req, res, next) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Administrator access required' });
+  }
+  next();
+};
+
+module.exports = {
+  authMiddleware,
+  optionalAuthMiddleware,
+  adminMiddleware,
+  strictAdminMiddleware,
+  hodMiddleware,
+  facultyAdvisorMiddleware
+};

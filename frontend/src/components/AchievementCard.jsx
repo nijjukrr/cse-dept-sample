@@ -24,7 +24,7 @@ function MedalIcon({ color, rank }) {
 
 export default function AchievementCard({ achievement, onDelete, showDelete }) {
   const [showModal, setShowModal] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const cfg = TYPE_CONFIG[achievement.type] || TYPE_CONFIG.course;
 
   // Determine status authoritatively when status exists, fallback to verified
@@ -72,7 +72,7 @@ export default function AchievementCard({ achievement, onDelete, showDelete }) {
                 className="btn btn-ghost btn-xs" 
                 onClick={(e) => { 
                   e.stopPropagation(); 
-                  setShowDeleteConfirm(true); 
+                  setShowConfirmDelete(true);
                 }}
                 title="Delete achievement"
                 style={{ color: '#DC2626', padding: '2px 6px', background: 'rgba(239, 68, 68, 0.08)', borderRadius: 6 }}
@@ -167,7 +167,11 @@ export default function AchievementCard({ achievement, onDelete, showDelete }) {
               ) : <div />}
               
               {showDelete && (
-                <button className="btn btn-danger" onClick={() => { onDelete(achievement.id); setShowModal(false); }} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <button 
+                  className="btn btn-danger" 
+                  onClick={() => setShowConfirmDelete(true)} 
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
                   <Trash2 size={16} /> Delete
                 </button>
               )}
@@ -176,15 +180,18 @@ export default function AchievementCard({ achievement, onDelete, showDelete }) {
         </div>
       )}
 
-      {/* Confirm Delete Modal */}
       <ConfirmModal
-        isOpen={showDeleteConfirm}
-        onClose={() => setShowDeleteConfirm(false)}
-        onConfirm={() => onDelete(achievement.id)}
-        title="Delete Achievement?"
-        message={`Are you sure you want to delete "${achievement.title}"?`}
+        isOpen={showConfirmDelete}
+        title="Delete Achievement"
+        itemName={achievement.title}
         confirmText="Delete"
-        type="danger"
+        cancelText="Cancel"
+        onConfirm={() => {
+          setShowConfirmDelete(false);
+          setShowModal(false);
+          onDelete(achievement.id);
+        }}
+        onCancel={() => setShowConfirmDelete(false)}
       />
     </>
   );

@@ -1,201 +1,613 @@
-const { supabase } = require('../db/supabase');
-const registry = require('../platforms/registry');
-const { calculateCompetitiveScore } = require('./scoringEngine');
+const platformStore = require('./platformStore');
+const codeforcesAdapter = require('../platforms/codeforcesAdapter');
+const leetcodeAdapter = require('../platforms/leetcodeAdapter');
+const geeksforgeeksAdapter = require('../platforms/geeksforgeeksAdapter');
+const hackerRankAdapter = require('../platforms/hackerRankAdapter');
+const { calculatePlatformScore } = require('./competitiveScoreService');
 
-// Minimum cooldown in ms between manual sync attempts for a given platform connection
-const SYNC_COOLDOWN_MS = 60 * 1000;
+const SYNC_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+const STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+const ongoingSyncs = new Set();
 
-class PlatformSyncService {
-  /**
-   * Connects a platform to a student account
-   */
-  async connectPlatform(userId, platformCode, rawUsername) {
-    const adapter = registry.getAdapter(platformCode);
-    if (!adapter) {
-      throw new Error(`Platform '${platformCode}' is not supported.`);
-    }
+const SUPPORTED_PLATFORMS = [
+  {
+    code: 'codeforces',
+    name: 'Codeforces',
+    icon: 'codeforces',
+    status: 'active',
+    description: 'Competitive programming platform rating, max rating, and solved problems.'
+  },
+  {
+    code: 'leetcode',
+    name: 'LeetCode',
+    icon: 'leetcode',
+    status: 'active',
+    description: 'LeetCode profile metrics, problem difficulties (Easy/Med/Hard), and self-verification challenge.'
+  },
+  {
+    code: 'geeksforgeeks',
+    name: 'GeeksforGeeks',
+    icon: 'geeksforgeeks',
+    status: 'active',
+    description: 'GeeksforGeeks profile score, total problems solved, institute rank, and streak.'
+  },
+  {
+    code: 'hackerrank',
+    name: 'HackerRank',
+    icon: 'hackerrank',
+    status: 'active',
+    description: 'HackerRank profile badges, total badges count, and domain scores.'
+  }
+];
 
-    const val = adapter.validateUsername(rawUsername);
-    if (!val.isValid) {
-      throw new Error(val.error);
-    }
+function generateVerificationToken() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let token = 'SIET-';
+  for (let i = 0; i < 6; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+}
 
-    const username = rawUsername.trim();
+function formatConnectionObj(conn) {
+  if (!conn) return null;
+  const metrics = conn.metrics || {};
+  const scoreObj = calculatePlatformScore(metrics, true);
 
-    // Verify account existence via platform adapter
-    const connectionResult = await adapter.connect(username);
-    if (!connectionResult.success) {
-      throw new Error(connectionResult.error || `Unable to verify ${adapter.name} profile.`);
-    }
+  return {
+    id: conn.id,
+    platformCode: conn.platform_code,
+    handle: conn.handle,
+    normalizedHandle: conn.normalized_handle,
+    ownershipVerified: true,
+    status: conn.status || 'connected',
+    metrics: metrics,
+    competitiveContribution: scoreObj.totalScore,
+    competitive_contribution: scoreObj.totalScore,
+    lastSyncedAt: conn.last_synced_at,
+    lastAttemptedAt: conn.last_attempted_at,
+    lastErrorCode: conn.last_error_code,
+    verificationToken: null
+  };
+}
 
-    const profileUrl = connectionResult.profileUrl || `${adapter.baseUrl}/${username}`;
+async function getPlatformsState(userId) {
+  const { connections, missingTable, error } = await platformStore.getAllConnectionsForUser(userId);
 
-    // Upsert into student_platform_connections
-    const { data: connection, error: upsertErr } = await supabase
-      .from('student_platform_connections')
-      .upsert(
-        {
-          user_id: userId,
-          platform_code: platformCode.toLowerCase(),
-          username,
-          profile_url: profileUrl,
-          connection_status: 'connected',
-          verification_level: 'verified_public_api',
-          sync_status: 'syncing',
-          last_attempted_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'user_id,platform_code' }
-      )
-      .select()
-      .single();
-
-    if (upsertErr || !connection) {
-      console.error('Error saving platform connection:', upsertErr);
-      throw new Error('Failed to save platform connection record.');
-    }
-
-    // Trigger initial sync in background / synchronous flow
-    await this.syncPlatform(userId, platformCode.toLowerCase(), true);
-
-    return connection;
+  if (error) {
+    throw error;
   }
 
-  /**
-   * Synchronizes metrics for a specific connected platform
-   */
-  async syncPlatform(userId, platformCode, bypassCooldown = false) {
-    const adapter = registry.getAdapter(platformCode);
-    if (!adapter) {
-      throw new Error(`Unsupported platform: ${platformCode}`);
+  if (missingTable) {
+    return {
+      configured: false,
+      message: 'Platform storage is not configured yet.',
+      platforms: SUPPORTED_PLATFORMS.map(p => ({
+        ...p,
+        connectionStatus: p.status === 'active' ? 'not_connected' : 'coming_soon',
+        competitiveContribution: 0,
+        competitive_contribution: 0,
+        connection: null
+      }))
+    };
+  }
+
+  const connMap = new Map((connections || []).map(c => [c.platform_code, c]));
+
+  const platforms = SUPPORTED_PLATFORMS.map(p => {
+    if (p.status === 'coming_soon') {
+      return {
+        ...p,
+        connectionStatus: 'coming_soon',
+        competitiveContribution: 0,
+        competitive_contribution: 0,
+        connection: null
+      };
     }
 
-    // 1. Fetch current connection record
-    const { data: conn, error: connErr } = await supabase
-      .from('student_platform_connections')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('platform_code', platformCode)
-      .maybeSingle();
-
-    if (connErr || !conn) {
-      throw new Error(`No active ${adapter.name} connection found for this user.`);
+    const conn = connMap.get(p.code);
+    if (!conn) {
+      return {
+        ...p,
+        connectionStatus: 'not_connected',
+        competitiveContribution: 0,
+        competitive_contribution: 0,
+        connection: null
+      };
     }
 
-    // 2. Check cooldown to prevent external API hammering
-    if (!bypassCooldown && conn.last_attempted_at) {
-      const elapsed = Date.now() - new Date(conn.last_attempted_at).getTime();
-      if (elapsed < SYNC_COOLDOWN_MS) {
-        const remainingSec = Math.ceil((SYNC_COOLDOWN_MS - elapsed) / 1000);
-        throw new Error(`Sync is in cooldown. Please wait ${remainingSec}s before refreshing ${adapter.name}.`);
-      }
-    }
+    const formattedConn = formatConnectionObj(conn);
+    const contribution = formattedConn ? formattedConn.competitiveContribution : 0;
 
-    const startTime = Date.now();
-    await supabase
-      .from('student_platform_connections')
-      .update({ last_attempted_at: new Date().toISOString(), sync_status: 'syncing' })
-      .eq('id', conn.id);
+    return {
+      ...p,
+      connectionStatus: conn.status || 'connected',
+      competitiveContribution: contribution,
+      competitive_contribution: contribution,
+      connection: formattedConn
+    };
+  });
 
+  return {
+    configured: true,
+    platforms
+  };
+}
+
+async function connectPlatform(userId, platformCode, rawHandle) {
+  if (!['codeforces', 'leetcode', 'geeksforgeeks', 'hackerrank'].includes(platformCode)) {
+    return { status: 400, error: 'Platform not supported yet.' };
+  }
+
+  let normalizedHandle;
+  let adapterResult;
+
+  if (platformCode === 'codeforces') {
     try {
-      // 3. Fetch external metrics
-      const rawMetrics = await adapter.fetchMetrics(conn.username);
-      const normalizedMetrics = adapter.normalizeMetrics(rawMetrics);
-      const platformScore = adapter.calculatePlatformScore(normalizedMetrics);
-
-      // 4. Update connection record
-      await supabase
-        .from('student_platform_connections')
-        .update({
-          raw_metrics: rawMetrics,
-          normalized_metrics: normalizedMetrics,
-          platform_score: platformScore,
-          sync_status: 'success',
-          last_synced_at: new Date().toISOString(),
-          error_message: null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', conn.id);
-
-      // 5. Audit log
-      await supabase.from('sync_audit_logs').insert({
-        user_id: userId,
-        platform_code: platformCode,
-        status: 'success',
-        duration_ms: Date.now() - startTime,
-      });
-
-      // 6. Recalculate student overall profile score
-      await this.recalculateStudentProfile(userId);
-
-      return {
-        success: true,
-        platform_code: platformCode,
-        score: platformScore,
-        normalized_metrics: normalizedMetrics,
-      };
+      normalizedHandle = codeforcesAdapter.normalizeHandle(rawHandle);
     } catch (err) {
-      console.warn(`Sync failed for ${platformCode} (${conn.username}):`, err.message);
-
-      // CRITICAL: Retain existing verified score and raw metrics on transient failure!
-      await supabase
-        .from('student_platform_connections')
-        .update({
-          sync_status: 'failed',
-          error_message: err.message,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', conn.id);
-
-      await supabase.from('sync_audit_logs').insert({
-        user_id: userId,
-        platform_code: platformCode,
-        status: 'failed',
-        error_category: err.name || 'ExternalError',
-        duration_ms: Date.now() - startTime,
-      });
-
-      return {
-        success: false,
-        platform_code: platformCode,
-        error: err.message,
-        retained_score: conn.platform_score,
-      };
+      return { status: 400, error: err.message };
+    }
+  } else if (platformCode === 'leetcode') {
+    try {
+      normalizedHandle = leetcodeAdapter.normalizeHandle(rawHandle);
+    } catch (err) {
+      return { status: 400, error: err.message };
+    }
+  } else if (platformCode === 'geeksforgeeks') {
+    try {
+      normalizedHandle = geeksforgeeksAdapter.normalizeHandle(rawHandle);
+    } catch (err) {
+      return { status: 400, error: err.message };
+    }
+  } else if (platformCode === 'hackerrank') {
+    try {
+      normalizedHandle = hackerRankAdapter.normalizeHandle(rawHandle);
+    } catch (err) {
+      return { status: 400, error: err.message };
     }
   }
 
-  /**
-   * Recalculates student's competitive profile score based on all connected platforms
-   */
-  async recalculateStudentProfile(userId) {
-    const { data: connections } = await supabase
-      .from('student_platform_connections')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('connection_status', 'connected');
+  // 1. DUPLICATE HANDLE CHECK across ALL students (unique platform_code + normalized_handle)
+  const { connection: existingOwner } = await platformStore.getConnectionByHandle(platformCode, normalizedHandle);
+  if (existingOwner && existingOwner.user_id !== userId) {
+    return { status: 409, error: 'This platform account is already connected to another student.' };
+  }
 
-    const scoreResult = calculateCompetitiveScore(connections || []);
+  // Check if current student is changing handle from a previously verified or unverified connection
+  const { connection: studentCurrentConn } = await platformStore.getConnection(userId, platformCode);
+  const isChangingHandle = studentCurrentConn && studentCurrentConn.normalized_handle !== normalizedHandle;
 
-    await supabase.from('student_competitive_profiles').upsert(
-      {
-        user_id: userId,
-        overall_score: scoreResult.overall_score,
-        problem_solving_score: scoreResult.problem_solving_score,
-        competitive_programming_score: scoreResult.competitive_programming_score,
-        open_source_score: scoreResult.open_source_score,
-        certifications_score: scoreResult.certifications_score,
-        community_score: scoreResult.community_score,
-        category_breakdown: scoreResult.category_breakdown,
-        platform_breakdown: scoreResult.platform_breakdown,
-        connected_platform_count: (connections || []).length,
-        last_calculated_at: scoreResult.last_calculated_at,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id' }
-    );
+  const now = new Date().toISOString();
 
-    return scoreResult;
+  if (platformCode === 'codeforces') {
+    adapterResult = await codeforcesAdapter.fetchCodeforcesUser(normalizedHandle);
+    if (!adapterResult.found) {
+      if (adapterResult.isOutage) {
+        return { status: 503, error: 'Codeforces is temporarily unavailable.' };
+      }
+      return { status: 400, error: 'Codeforces handle not found.' };
+    }
+
+    const savePayload = {
+      userId,
+      platformCode: 'codeforces',
+      handle: adapterResult.handle,
+      normalizedHandle: adapterResult.normalizedHandle,
+      metrics: adapterResult.metrics,
+      status: 'connected',
+      ownershipVerified: isChangingHandle ? false : (studentCurrentConn ? studentCurrentConn.ownership_verified : false),
+      lastSyncedAt: null,
+      lastAttemptedAt: now,
+      lastErrorCode: null
+    };
+
+    const { connection, duplicate, missingTable, error } = await platformStore.saveConnection(savePayload);
+    if (missingTable) {
+      return { status: 200, configured: false, error: 'Platform storage is not configured yet.' };
+    }
+    if (duplicate) {
+      return { status: 409, error: 'This platform account is already connected to another student.' };
+    }
+    if (error) {
+      console.error(`[DB ERROR] saveConnection failed for user ${userId}, platform codeforces:`, error.code, error.message);
+      return { status: 500, error: 'Failed to store platform connection.' };
+    }
+
+    return {
+      status: 200,
+      success: true,
+      connection: formatConnectionObj(connection)
+    };
+
+  } else if (platformCode === 'leetcode') {
+    adapterResult = await leetcodeAdapter.fetchLeetCodeUser(normalizedHandle);
+    if (!adapterResult.found) {
+      if (adapterResult.isOutage) {
+        return { status: 503, error: 'LeetCode is temporarily unavailable.' };
+      }
+      return { status: 400, error: 'LeetCode handle not found.' };
+    }
+
+    const savePayload = {
+      userId,
+      platformCode: 'leetcode',
+      handle: adapterResult.handle,
+      normalizedHandle: adapterResult.normalizedHandle,
+      metrics: adapterResult.metrics,
+      status: 'connected',
+      ownershipVerified: true,
+      verificationToken: null,
+      verificationExpiresAt: null,
+      lastSyncedAt: null,
+      lastAttemptedAt: now,
+      lastErrorCode: null
+    };
+
+    const { connection, duplicate, missingTable, error } = await platformStore.saveConnection(savePayload);
+    if (missingTable) {
+      return { status: 200, configured: false, error: 'Platform storage is not configured yet.' };
+    }
+    if (duplicate) {
+      return { status: 409, error: 'This platform account is already connected to another student.' };
+    }
+    if (error) {
+      console.error(`[DB ERROR] saveConnection failed for user ${userId}, platform leetcode:`, error.code, error.message);
+      return { status: 500, error: 'Failed to store platform connection.' };
+    }
+
+    return {
+      status: 200,
+      success: true,
+      connection: formatConnectionObj(connection)
+    };
+
+  } else if (platformCode === 'geeksforgeeks') {
+    adapterResult = await geeksforgeeksAdapter.fetchGFGUser(normalizedHandle);
+    if (!adapterResult.found) {
+      if (adapterResult.isOutage) {
+        return { status: 503, error: 'GeeksforGeeks is temporarily unavailable.' };
+      }
+      return { status: 400, error: 'GeeksforGeeks handle not found.' };
+    }
+
+    const savePayload = {
+      userId,
+      platformCode: 'geeksforgeeks',
+      handle: adapterResult.handle,
+      normalizedHandle: adapterResult.normalizedHandle,
+      metrics: adapterResult.metrics,
+      status: 'connected',
+      ownershipVerified: isChangingHandle ? false : Boolean(studentCurrentConn?.ownership_verified),
+      verificationToken: null,
+      verificationExpiresAt: null,
+      lastSyncedAt: null,
+      lastAttemptedAt: now,
+      lastErrorCode: null
+    };
+
+    const { connection, duplicate, missingTable, error } = await platformStore.saveConnection(savePayload);
+    if (missingTable) {
+      return { status: 200, configured: false, error: 'Platform storage is not configured yet.' };
+    }
+    if (duplicate) {
+      return { status: 409, error: 'This platform account is already connected to another student.' };
+    }
+    if (error) {
+      console.error(`[DB ERROR] saveConnection failed for user ${userId}, platform geeksforgeeks:`, error.code, error.message);
+      return { status: 500, error: 'Failed to store platform connection.' };
+    }
+
+    return {
+      status: 200,
+      success: true,
+      connection: formatConnectionObj(connection)
+    };
+
+  } else if (platformCode === 'hackerrank') {
+    adapterResult = await hackerRankAdapter.fetchHackerRankUser(normalizedHandle);
+    if (!adapterResult.found) {
+      if (adapterResult.isOutage) {
+        return { status: 503, error: 'HackerRank is temporarily unavailable.' };
+      }
+      return { status: 400, error: 'HackerRank handle not found.' };
+    }
+
+    const savePayload = {
+      userId,
+      platformCode: 'hackerrank',
+      handle: adapterResult.handle,
+      normalizedHandle: adapterResult.normalizedHandle,
+      metrics: adapterResult.metrics,
+      status: 'connected',
+      ownershipVerified: isChangingHandle ? false : Boolean(studentCurrentConn?.ownership_verified),
+      verificationToken: null,
+      verificationExpiresAt: null,
+      lastSyncedAt: null,
+      lastAttemptedAt: now,
+      lastErrorCode: null
+    };
+
+    const { connection, duplicate, missingTable, error } = await platformStore.saveConnection(savePayload);
+    if (missingTable) {
+      return { status: 200, configured: false, error: 'Platform storage is not configured yet.' };
+    }
+    if (duplicate) {
+      return { status: 409, error: 'This platform account is already connected to another student.' };
+    }
+    if (error) {
+      console.error(`[DB ERROR] saveConnection failed for user ${userId}, platform hackerrank:`, error.code, error.message);
+      return { status: 500, error: 'Failed to store platform connection.' };
+    }
+
+    return {
+      status: 200,
+      success: true,
+      connection: formatConnectionObj(connection)
+    };
   }
 }
 
-module.exports = new PlatformSyncService();
+async function verifyPlatform(userId, platformCode) {
+  if (platformCode !== 'leetcode') {
+    return { status: 400, error: 'Self-service verification is currently supported for LeetCode.' };
+  }
+
+  const { connection, missingTable, error } = await platformStore.getConnection(userId, platformCode);
+  if (missingTable) {
+    return { status: 200, configured: false, error: 'Platform storage is not configured yet.' };
+  }
+  if (error || !connection) {
+    return { status: 404, error: 'LeetCode connection not found.' };
+  }
+
+  if (connection.ownership_verified) {
+    return {
+      status: 200,
+      success: true,
+      message: 'LeetCode ownership is already verified.',
+      connection: formatConnectionObj(connection)
+    };
+  }
+
+  const token = connection.verification_token;
+  if (!token) {
+    return { status: 400, error: 'No active verification code found. Please reconnect your LeetCode profile.' };
+  }
+
+  if (connection.verification_expires_at) {
+    const expiresAtMs = new Date(connection.verification_expires_at).getTime();
+    if (expiresAtMs < Date.now()) {
+      return {
+        status: 400,
+        success: false,
+        error: 'Verification code has expired. Please reconnect your LeetCode profile to generate a new code.'
+      };
+    }
+  }
+
+  const lcResult = await leetcodeAdapter.fetchLeetCodeUser(connection.handle);
+  if (!lcResult.found) {
+    if (lcResult.isOutage) {
+      return { status: 503, error: 'LeetCode is temporarily unavailable. Please try again later.' };
+    }
+    return { status: 400, error: 'LeetCode profile could not be retrieved.' };
+  }
+
+  const realName = (lcResult.realName || '').trim();
+  const tokenStr = (token || '').trim();
+  const isMatch = realName.toLowerCase() === tokenStr.toLowerCase();
+
+  if (!isMatch) {
+    return {
+      status: 400,
+      success: false,
+      error: 'Verification code was not found in your LeetCode Display Name.'
+    };
+  }
+
+  const updatePayload = {
+    ownership_verified: true,
+    status: 'verified',
+    verification_token: null,
+    verification_expires_at: null,
+    metrics: lcResult.metrics
+  };
+
+  const { connection: updatedConn, error: updateErr } = await platformStore.updateConnectionStatus(userId, platformCode, updatePayload);
+  if (updateErr) {
+    return { status: 500, error: 'Failed to update platform verification status.' };
+  }
+
+  return {
+    status: 200,
+    success: true,
+    message: 'Ownership verified successfully!',
+    connection: formatConnectionObj(updatedConn)
+  };
+}
+
+async function syncPlatform(userId, platformCode) {
+  if (!['codeforces', 'leetcode', 'geeksforgeeks', 'hackerrank'].includes(platformCode)) {
+    return { status: 400, error: 'Platform not supported yet.' };
+  }
+
+  const { connection, missingTable, error } = await platformStore.getConnection(userId, platformCode);
+  if (missingTable) {
+    return { status: 200, configured: false, error: 'Platform storage is not configured yet.' };
+  }
+  if (error || !connection) {
+    const platformNames = {
+      codeforces: 'Codeforces',
+      leetcode: 'LeetCode',
+      geeksforgeeks: 'GeeksforGeeks',
+      hackerrank: 'HackerRank'
+    };
+    return { status: 404, error: `${platformNames[platformCode] || platformCode} connection not found.` };
+  }
+
+  // 5-minute cooldown check
+  const lastSynced = connection.last_synced_at ? new Date(connection.last_synced_at).getTime() : 0;
+  const now = Date.now();
+
+  if (lastSynced > 0 && (now - lastSynced) < SYNC_COOLDOWN_MS) {
+    const remainingSeconds = Math.ceil((SYNC_COOLDOWN_MS - (now - lastSynced)) / 1000);
+    const minutes = Math.floor(remainingSeconds / 60);
+    const seconds = remainingSeconds % 60;
+    const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+
+    return {
+      status: 429,
+      error: `Sync cooldown active. Please wait ${timeStr} before syncing again.`,
+      cooldown: true,
+      connection: formatConnectionObj(connection)
+    };
+  }
+
+  const attemptedAt = new Date().toISOString();
+  let fetchResult;
+
+  if (platformCode === 'codeforces') {
+    fetchResult = await codeforcesAdapter.fetchCodeforcesUser(connection.normalized_handle || connection.handle);
+  } else if (platformCode === 'leetcode') {
+    fetchResult = await leetcodeAdapter.fetchLeetCodeUser(connection.normalized_handle || connection.handle);
+  } else if (platformCode === 'geeksforgeeks') {
+    fetchResult = await geeksforgeeksAdapter.fetchGFGUser(connection.normalized_handle || connection.handle);
+  } else if (platformCode === 'hackerrank') {
+    fetchResult = await hackerRankAdapter.fetchHackerRankUser(connection.normalized_handle || connection.handle);
+  }
+
+  if (!fetchResult.found) {
+    const errorCode = fetchResult.isOutage
+      ? `${platformCode.toUpperCase()}_UNAVAILABLE`
+      : `${platformCode.toUpperCase()}_HANDLE_NOT_FOUND`;
+    const platformNames = {
+      codeforces: 'Codeforces',
+      leetcode: 'LeetCode',
+      geeksforgeeks: 'GeeksforGeeks',
+      hackerrank: 'HackerRank'
+    };
+    const displayName = platformNames[platformCode] || platformCode;
+    const errorMessage = fetchResult.isOutage
+      ? `${displayName} is temporarily unavailable. Try again later.`
+      : `Last sync failed. Connected handle could not be found on ${displayName}.`;
+
+    const updatePayload = {
+      status: 'sync_error',
+      last_attempted_at: attemptedAt,
+      last_error_code: errorCode
+    };
+
+    const { connection: updatedConn } = await platformStore.updateConnectionStatus(userId, platformCode, updatePayload);
+
+    return {
+      status: 200,
+      syncError: true,
+      message: errorMessage,
+      connection: formatConnectionObj(updatedConn || {
+        ...connection,
+        status: 'sync_error',
+        last_attempted_at: attemptedAt,
+        last_error_code: errorCode
+      })
+    };
+  }
+
+  const updatePayload = {
+    metrics: fetchResult.metrics,
+    status: connection.ownership_verified ? 'verified' : 'connected',
+    last_synced_at: attemptedAt,
+    last_attempted_at: attemptedAt,
+    last_error_code: null
+  };
+
+  const { connection: updatedConn, error: updateErr } = await platformStore.updateConnectionStatus(userId, platformCode, updatePayload);
+  if (updateErr) {
+    return { status: 500, error: 'Failed to update platform connection metrics.' };
+  }
+
+  return {
+    status: 200,
+    success: true,
+    connection: formatConnectionObj(updatedConn)
+  };
+}
+
+async function disconnectPlatform(userId, platformCode) {
+  if (!['codeforces', 'leetcode', 'geeksforgeeks', 'hackerrank'].includes(platformCode)) {
+    return { status: 400, error: 'Platform not supported yet.' };
+  }
+
+  const { success, error } = await platformStore.deleteConnection(userId, platformCode);
+  if (error) {
+    return { status: 500, error: 'Failed to disconnect platform.' };
+  }
+
+  return {
+    status: 200,
+    success: true,
+    message: `${platformCode} disconnected successfully.`
+  };
+}
+
+async function syncStalePlatforms(userId) {
+  const { connections, missingTable, error } = await platformStore.getAllConnectionsForUser(userId);
+  if (missingTable || error || !Array.isArray(connections)) {
+    return { syncedPlatforms: [], synced: false, state: await getPlatformsState(userId) };
+  }
+
+  const now = Date.now();
+  const stalePlatforms = [];
+
+  for (const conn of connections) {
+    const pCode = conn.platform_code;
+    if (!['codeforces', 'leetcode', 'geeksforgeeks', 'hackerrank'].includes(pCode)) continue;
+
+    const lastSyncedMs = conn.last_synced_at ? new Date(conn.last_synced_at).getTime() : 0;
+    const isStale = lastSyncedMs === 0 || (now - lastSyncedMs) >= STALE_THRESHOLD_MS;
+
+    const syncKey = `${userId}:${pCode}`;
+    if (isStale && !ongoingSyncs.has(syncKey)) {
+      stalePlatforms.push(pCode);
+    }
+  }
+
+  if (stalePlatforms.length === 0) {
+    return {
+      syncedPlatforms: [],
+      synced: false,
+      state: await getPlatformsState(userId)
+    };
+  }
+
+  await Promise.allSettled(
+    stalePlatforms.map(async (pCode) => {
+      const syncKey = `${userId}:${pCode}`;
+      ongoingSyncs.add(syncKey);
+      try {
+        await syncPlatform(userId, pCode);
+      } catch (err) {
+        console.error(`[AUTO-SYNC ERROR] Failed auto-sync for user ${userId} platform ${pCode}:`, err);
+      } finally {
+        ongoingSyncs.delete(syncKey);
+      }
+    })
+  );
+
+  const newState = await getPlatformsState(userId);
+
+  return {
+    syncedPlatforms: stalePlatforms,
+    synced: true,
+    state: newState
+  };
+}
+
+module.exports = {
+  getPlatformsState,
+  connectPlatform,
+  verifyPlatform,
+  syncPlatform,
+  syncStalePlatforms,
+  disconnectPlatform
+};

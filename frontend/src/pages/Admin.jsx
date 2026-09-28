@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Link, Navigate, useLocation } from 'react-router-dom';
+import { useState, useEffect, useCallback } from 'react';
+import { Link, Navigate } from 'react-router-dom';
 import client from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import { useUndoableDelete } from '../contexts/UndoDeleteContext';
 import StudentActionModal from '../components/StudentActionModal';
 import ImportModal from '../components/ImportModal';
 import CustomSelect from '../components/CustomSelect';
@@ -9,83 +10,23 @@ import FilterModal from '../components/FilterModal';
 import FacultyAdvisorModal from '../components/FacultyAdvisorModal';
 import FacultyActionModal from '../components/FacultyActionModal';
 import ConfirmModal from '../components/ConfirmModal';
+import SplitActions from '../components/ui/split-actions';
 import { 
   Shield, BarChart2, Users, Settings, GraduationCap, Hourglass, 
   Award, TrendingUp, List, RefreshCw, Trash2, Download, Plus, 
-  Edit3, Key, Check, X, ExternalLink, Inbox, Search, CheckCircle,
-  Megaphone, Send, Image, Eye, EyeOff, Sparkles, FileText, XCircle
+  Edit3, Key, Check, X, ExternalLink, Inbox, Search, CheckCircle, Code, Send, Image as ImageIcon, Upload
 } from 'lucide-react';
 
 const CLASSES = ['CSE-A', 'CSE-B', 'CSE-C', 'CSE-D', 'CSE-E'];
-const CATEGORIES = ['Important', 'Hackathon Winner', 'Placement', 'Department Update', 'Event', 'Achievement', 'General'];
-
-function areAchievementsEqual(aList, bList) {
-  if (!aList || !bList) return aList === bList;
-  if (aList.length !== bList.length) return false;
-  for (let i = 0; i < aList.length; i++) {
-    const a = aList[i];
-    const b = bList[i];
-    if (!a || !b) return false;
-    if (
-      a.id !== b.id ||
-      a.status !== b.status ||
-      a.verified !== b.verified ||
-      a.title !== b.title ||
-      a.description !== b.description ||
-      a.position !== b.position ||
-      a.duration !== b.duration ||
-      a.student_name !== b.student_name ||
-      a.roll_no !== b.roll_no ||
-      a.class !== b.class ||
-      a.batch !== b.batch ||
-      a.created_at !== b.created_at
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
 
 export default function Admin() {
-  const { user, isAdmin, refreshUser } = useAuth();
-  const location = useLocation();
+  const { user, refreshUser } = useAuth();
+  const { requestUndoableDelete } = useUndoableDelete();
   const [students, setStudents] = useState([]);
   const [achievements, setAchievements] = useState([]);
-  const achievementsRef = useRef(achievements);
-  achievementsRef.current = achievements;
-  const isFetchingPendingRef = useRef(false);
-  const [pendingLoading, setPendingLoading] = useState(true);
-  const [pendingError, setPendingError] = useState(null);
-  const pendingSeqRef = useRef(0);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('tab') || 'overview';
-  });
+  const [tab, setTab] = useState('overview');
   const [toast, setToast] = useState(null);
-
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const urlTab = params.get('tab');
-    if (urlTab && ['overview', 'students', 'manage', 'faculty', 'post-notify', 'pending'].includes(urlTab)) {
-      setTab(urlTab);
-    }
-  }, [location.search]);
-
-  // Post & Notify state
-  const [announcements, setAnnouncements] = useState([]);
-  const [annLoading, setAnnLoading] = useState(false);
-  const [postTitle, setPostTitle] = useState('');
-  const [postCategory, setPostCategory] = useState('Hackathon Winner');
-  const [postImageUrl, setPostImageUrl] = useState('');
-  const [postFile, setPostFile] = useState(null);
-  const [postFilePreview, setPostFilePreview] = useState(null);
-  const [postUploadMode, setPostUploadMode] = useState('file'); // 'file' | 'url'
-  const [postFileError, setPostFileError] = useState(null);
-  const [postContent, setPostContent] = useState('');
-  const [postIsActive, setPostIsActive] = useState(true);
-  const [publishing, setPublishing] = useState(false);
-  const [editingAnnId, setEditingAnnId] = useState(null);
 
   // Manage Students state
   const [managedStudents, setManagedStudents] = useState([]);
@@ -106,117 +47,55 @@ export default function Admin() {
   const [facLoading, setFacLoading] = useState(false);
   const [editFaculty, setEditFaculty] = useState(null);
   const [showAddFacModal, setShowAddFacModal] = useState(false);
+  const [deleteFacultyTarget, setDeleteFacultyTarget] = useState(null);
+
+  // Platform Verification state
+  const [platformConnections, setPlatformConnections] = useState([]);
+  const [platLoading, setPlatLoading] = useState(false);
+  const [platSearch, setPlatSearch] = useState('');
+  const [platStatusFilter, setPlatStatusFilter] = useState('all');
+  const [platPlatformFilter, setPlatPlatformFilter] = useState('all');
+
+  // Post & Notify state
+  const [notifyForm, setNotifyForm] = useState({ title: '', type: 'General', message: '', is_important: false, target: 'all', link: '', expires_at: '' });
+  const [notifyLoading, setNotifyLoading] = useState(false);
+  const [sentNotifications, setSentNotifications] = useState([]);
+  const [deleteAnnTarget, setDeleteAnnTarget] = useState(null);
+  const [annImageFile, setAnnImageFile] = useState(null);
+  const [annImagePreview, setAnnImagePreview] = useState(null);
+  const [uploadingAnnImage, setUploadingAnnImage] = useState(false);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3500);
   };
 
-  // Load overview data instantly using stale-while-revalidate
+  const [recentApproved, setRecentApproved] = useState([]);
+  const [overviewStats, setOverviewStats] = useState(null);
+
+  // Load overview data
   useEffect(() => {
     refreshUser();
-    const cachedStudents = sessionStorage.getItem('admin_overview_students');
-    let hasCache = false;
-
-    if (cachedStudents) {
-      try { setStudents(JSON.parse(cachedStudents)); hasCache = true; } catch (e) {}
-    }
-
-    if (hasCache) setLoading(false);
-
-    Promise.all([
+    Promise.allSettled([
       client.get('/admin/students'),
       client.get('/achievements/all/pending'),
-    ]).then(([uRes, aRes]) => {
-      if (uRes?.data) {
-        setStudents(uRes.data);
-        sessionStorage.setItem('admin_overview_students', JSON.stringify(uRes.data));
+      client.get('/achievements/recent/approved'),
+      client.get('/admin/overview-stats')
+    ]).then(([uRes, aRes, recRes, statRes]) => {
+      if (uRes.status === 'fulfilled') setStudents(uRes.value.data);
+      if (aRes.status === 'fulfilled') setAchievements(aRes.value.data);
+      if (recRes.status === 'fulfilled' && Array.isArray(recRes.value.data)) {
+        setRecentApproved(recRes.value.data);
       }
-      if (aRes?.data) {
-        setAchievements(aRes.data);
+      if (statRes.status === 'fulfilled' && statRes.value.data) {
+        setOverviewStats(statRes.value.data);
       }
-    }).catch(err => {
-      console.warn('Overview fetch warning:', err);
     }).finally(() => setLoading(false));
   }, []);
 
-  // Silent background synchronization for Pending Achievements tab (3s polling when active & visible)
-  useEffect(() => {
-    let intervalId = null;
-
-    const fetchPending = async ({ silent = false } = {}) => {
-      if (document.hidden || isFetchingPendingRef.current) return;
-      isFetchingPendingRef.current = true;
-      const currentSeq = ++pendingSeqRef.current;
-
-      if (!silent && achievementsRef.current.length === 0) {
-        setPendingLoading(true);
-      }
-      setPendingError(null);
-
-      try {
-        const res = await client.get('/achievements/all/pending');
-        if (currentSeq >= pendingSeqRef.current) {
-          const newData = res.data || [];
-          if (!areAchievementsEqual(achievementsRef.current, newData)) {
-            setAchievements(newData);
-          }
-          setPendingError(null);
-        }
-      } catch (err) {
-        if (currentSeq >= pendingSeqRef.current) {
-          console.warn('Pending background sync error:', err);
-          if (!silent) setPendingError('Unable to load pending submissions.');
-        }
-      } finally {
-        isFetchingPendingRef.current = false;
-        if (currentSeq >= pendingSeqRef.current && !silent) {
-          setPendingLoading(false);
-        }
-      }
-    };
-
-    if (tab === 'pending') {
-      fetchPending({ silent: achievementsRef.current.length > 0 });
-      intervalId = setInterval(() => fetchPending({ silent: true }), 3000);
-    }
-
-    const handleFocus = () => {
-      if (tab === 'pending') fetchPending({ silent: true });
-    };
-
-    const handlePendingUpdated = () => {
-      if (tab === 'pending') fetchPending({ silent: true });
-    };
-
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('pendingUpdated', handlePendingUpdated);
-
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-      window.removeEventListener('focus', handleFocus);
-      window.removeEventListener('pendingUpdated', handlePendingUpdated);
-    };
-  }, [tab]);
-
-  // Load managed students with cache boost
+  // Load managed students
   const loadManagedStudents = useCallback(async () => {
-    const isUnfiltered = !search && !filterClass && !filterBatch;
-    if (isUnfiltered) {
-      const cached = sessionStorage.getItem('admin_managed_students');
-      if (cached) {
-        try {
-          const data = JSON.parse(cached);
-          setManagedStudents(data);
-          setBatches([...new Set(data.map(s => s.batch).filter(Boolean))].sort());
-        } catch (e) {}
-      } else {
-        setManageLoading(true);
-      }
-    } else {
-      setManageLoading(true);
-    }
-
+    setManageLoading(true);
     try {
       const params = {};
       if (search) params.search = search;
@@ -224,11 +103,9 @@ export default function Admin() {
       if (filterBatch) params.batch = filterBatch;
       const res = await client.get('/admin/students', { params });
       setManagedStudents(res.data);
+      // Collect unique batches for filter dropdown
       const uniqueBatches = [...new Set(res.data.map(s => s.batch).filter(Boolean))].sort();
       setBatches(uniqueBatches);
-      if (isUnfiltered) {
-        sessionStorage.setItem('admin_managed_students', JSON.stringify(res.data));
-      }
     } catch {
       showToast('Failed to load students.', 'error');
     } finally {
@@ -237,16 +114,10 @@ export default function Admin() {
   }, [search, filterClass, filterBatch]);
 
   const loadFaculties = useCallback(async () => {
-    const cached = sessionStorage.getItem('admin_faculties');
-    if (cached) {
-      try { setFaculties(JSON.parse(cached)); } catch (e) {}
-    } else {
-      setFacLoading(true);
-    }
+    setFacLoading(true);
     try {
       const res = await client.get('/admin/faculty');
       setFaculties(res.data);
-      sessionStorage.setItem('admin_faculties', JSON.stringify(res.data));
     } catch {
       showToast('Failed to load faculty list.', 'error');
     } finally {
@@ -254,295 +125,217 @@ export default function Admin() {
     }
   }, []);
 
-  const loadAnnouncements = useCallback(async () => {
-    const cached = sessionStorage.getItem('admin_announcements');
-    if (cached) {
-      try { setAnnouncements(JSON.parse(cached)); } catch (e) {}
-    } else {
-      setAnnLoading(true);
-    }
+  const loadPlatformConnections = useCallback(async () => {
+    setPlatLoading(true);
     try {
-      const res = await client.get('/admin/announcements');
-      setAnnouncements(res.data);
-      sessionStorage.setItem('admin_announcements', JSON.stringify(res.data));
-    } catch (err) {
-      showToast(err.response?.data?.error || 'Failed to load announcements.', 'error');
+      const res = await client.get('/platforms/admin/connections');
+      setPlatformConnections(res.data?.connections || []);
+    } catch {
+      showToast('Failed to load platform connections.', 'error');
     } finally {
-      setAnnLoading(false);
+      setPlatLoading(false);
+    }
+  }, []);
+
+  const handleAdminVerifyPlatform = async (userId, platformCode, verifyStatus) => {
+    try {
+      const res = await client.post('/platforms/admin/verify', {
+        userId,
+        platformCode,
+        verified: verifyStatus
+      });
+      if (res.data?.success) {
+        setPlatformConnections(prev => prev.map(c =>
+          (c.userId === userId && c.platformCode === platformCode)
+            ? { ...c, ownershipVerified: verifyStatus }
+            : c
+        ));
+        showToast(verifyStatus ? 'Platform connection verified! ✅' : 'Platform connection unverified.');
+      }
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Failed to update verification status.', 'error');
+    }
+  };
+
+  const handleDeleteFacultyConfirm = async () => {
+    if (!deleteFacultyTarget) return;
+    const target = deleteFacultyTarget;
+    const targetId = target.user_id || target.id;
+    setDeleteFacultyTarget(null);
+
+    requestUndoableDelete({
+      id: targetId,
+      type: 'Faculty',
+      label: target.name || 'Faculty Member',
+      itemData: target,
+      onOptimisticRemove: () => {
+        setFaculties(prev => prev.filter(f => f.id !== targetId && f.user_id !== targetId));
+      },
+      onRestore: () => {
+        setFaculties(prev => {
+          if (prev.some(f => f.id === targetId || f.user_id === targetId)) return prev;
+          return [...prev, target];
+        });
+      },
+      onCommit: async () => {
+        await client.delete(`/admin/faculty/${targetId}`);
+      },
+      onFailure: (err) => {
+        showToast(err?.response?.data?.error || 'Unable to delete faculty. Please try again.', 'error');
+      }
+    });
+  };
+
+  const loadAnnouncements = useCallback(async () => {
+    try {
+      const res = await client.get('/announcements');
+      if (res.data?.success) {
+        setSentNotifications(res.data.announcements || []);
+      }
+    } catch {
+      setSentNotifications([]);
     }
   }, []);
 
   useEffect(() => {
     if (tab === 'manage') loadManagedStudents();
     if (tab === 'faculty') loadFaculties();
-    if (tab === 'post-notify') loadAnnouncements();
-  }, [tab, loadManagedStudents, loadFaculties, loadAnnouncements]);
+    if (tab === 'platforms') loadPlatformConnections();
+    if (tab === 'notify') loadAnnouncements();
+  }, [tab, loadManagedStudents, loadFaculties, loadPlatformConnections, loadAnnouncements]);
 
-  const handlePostFileChange = (e) => {
+  const handleDeleteAnnouncementConfirm = async () => {
+    if (!deleteAnnTarget) return;
+    const targetAnn = deleteAnnTarget;
+    const targetId = targetAnn.id;
+    setDeleteAnnTarget(null);
+
+    requestUndoableDelete({
+      id: targetId,
+      type: 'Announcement',
+      label: targetAnn.title || 'Announcement',
+      itemData: targetAnn,
+      onOptimisticRemove: () => {
+        setSentNotifications(prev => prev.filter(n => String(n.id) !== String(targetId)));
+      },
+      onRestore: () => {
+        setSentNotifications(prev => {
+          if (prev.some(n => String(n.id) === String(targetId))) return prev;
+          return [targetAnn, ...prev];
+        });
+      },
+      onCommit: async () => {
+        await client.delete(`/announcements/${targetId}`);
+      },
+      onFailure: (err) => {
+        showToast(err?.response?.data?.error || 'Unable to delete announcement. Please try again.', 'error');
+      }
+    });
+  };
+
+  const handleAnnImageChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setPostFileError(null);
-
-    // Validate size (max 5MB)
-    if (file.size > 5 * 1024 * 1024) {
-      setPostFileError('File size exceeds maximum limit of 5MB.');
-      setPostFile(null);
-      setPostFilePreview(null);
-      return;
-    }
-
-    // Validate MIME / extension (Images only! No PDFs)
     const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
-    const allowedExts = ['.jpg', '.jpeg', '.png', '.webp'];
-
-    if (!allowedTypes.includes((file.type || '').toLowerCase()) && !allowedExts.includes(ext)) {
-      setPostFileError('Invalid file type. Supported image formats: JPG, PNG, WEBP.');
-      setPostFile(null);
-      setPostFilePreview(null);
+    if (!allowedTypes.includes(file.type.toLowerCase())) {
+      showToast('Invalid file format. Please upload JPEG, PNG, or WEBP image.', 'error');
       return;
     }
-
-    setPostFile(file);
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setPostFilePreview(reader.result);
-    };
-    reader.readAsDataURL(file);
+    if (file.size > 5 * 1024 * 1024) {
+      showToast('Image must be 5 MB or smaller.', 'error');
+      return;
+    }
+    setAnnImageFile(file);
+    setAnnImagePreview(URL.createObjectURL(file));
   };
 
-  const removePostFile = () => {
-    setPostFile(null);
-    setPostFilePreview(null);
-    setPostFileError(null);
+  const handleRemoveAnnImage = () => {
+    setAnnImageFile(null);
+    if (annImagePreview) {
+      URL.revokeObjectURL(annImagePreview);
+    }
+    setAnnImagePreview(null);
   };
 
-  const handleSaveAnnouncement = async (e) => {
+  const handleSendNotification = async (e) => {
     e.preventDefault();
-    if (!postTitle.trim() || !postContent.trim()) {
-      showToast('Title and news message are required.', 'error');
+    if (!notifyForm.title.trim() || !notifyForm.message.trim()) {
+      showToast('Title and message are required.', 'error');
       return;
     }
-    setPublishing(true);
-    setPostFileError(null);
+    setNotifyLoading(true);
+    let imageUrl = null;
+    let imageStoragePath = null;
 
     try {
-      let finalImageUrl = postImageUrl;
-
-      if (postUploadMode === 'file' && postFile) {
+      if (annImageFile) {
+        setUploadingAnnImage(true);
         const formData = new FormData();
-        formData.append('file', postFile);
-
-        try {
-          const uploadRes = await client.post('/uploads/announcement-image', formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
-          if (uploadRes.data?.url) {
-            finalImageUrl = uploadRes.data.url;
-          }
-        } catch (uploadErr) {
-          const errMsg = uploadErr.response?.data?.error || 'File upload is not configured yet. You can paste a public URL instead.';
-          setPostFileError(errMsg);
-          if (uploadErr.response?.data?.storage_available === false) {
-            setPostUploadMode('url');
-          }
-          showToast(errMsg, 'error');
-          setPublishing(false);
-          return;
+        formData.append('file', annImageFile);
+        const uploadRes = await client.post('/uploads/announcement', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' }
+        });
+        if (uploadRes.data?.success) {
+          imageUrl = uploadRes.data.url;
+          imageStoragePath = uploadRes.data.storage_ref;
+        } else {
+          throw new Error('Image upload failed.');
         }
       }
 
       const payload = {
-        title: postTitle,
-        category: postCategory,
-        image_url: finalImageUrl,
-        content: postContent,
-        is_active: postIsActive
+        ...notifyForm,
+        image_url: imageUrl,
+        image_storage_path: imageStoragePath
       };
-      if (editingAnnId) {
-        const res = await client.patch(`/admin/announcements/${editingAnnId}`, payload);
-        setAnnouncements(prev => {
-          const updated = prev.map(a => a.id === editingAnnId ? res.data : a);
-          sessionStorage.setItem('admin_announcements', JSON.stringify(updated));
-          return updated;
-        });
-        showToast('Post updated successfully! 🚀');
-      } else {
-        const res = await client.post('/admin/announcements', payload);
-        setAnnouncements(prev => {
-          const updated = [res.data, ...prev];
-          sessionStorage.setItem('admin_announcements', JSON.stringify(updated));
-          return updated;
-        });
-        showToast('Post published successfully! 📢');
+
+      const res = await client.post('/announcements', payload);
+      if (res.data?.success) {
+        showToast('Announcement broadcasted successfully! 📢');
+        const created = res.data.announcement || { ...payload, id: Date.now(), created_at: new Date().toISOString() };
+        setSentNotifications(prev => [created, ...prev.filter(n => String(n.id) !== String(created.id))]);
+        setNotifyForm({ title: '', type: 'General', message: '', is_important: false, target: 'all', link: '', expires_at: '' });
+        handleRemoveAnnImage();
       }
-      setPostTitle('');
-      setPostCategory('Hackathon Winner');
-      setPostImageUrl('');
-      setPostFile(null);
-      setPostFilePreview(null);
-      setPostFileError(null);
-      setPostContent('');
-      setPostIsActive(true);
-      setEditingAnnId(null);
     } catch (err) {
-      showToast(err.response?.data?.error || (editingAnnId ? 'Failed to update announcement.' : 'Failed to publish announcement. Please try again.'), 'error');
+      showToast(err.response?.data?.error || err.message || 'Failed to send notification.', 'error');
     } finally {
-      setPublishing(false);
+      setNotifyLoading(false);
+      setUploadingAnnImage(false);
     }
   };
 
-  const handleEditAnn = (ann) => {
-    setEditingAnnId(ann.id);
-    setPostTitle(ann.title);
-    setPostCategory(ann.category || 'General');
-    setPostImageUrl(ann.image_url || '');
-    setPostFile(null);
-    setPostFilePreview(null);
-    setPostFileError(null);
-    setPostContent(ann.content);
-    setPostIsActive(ann.is_active);
-    window.scrollTo({ top: 180, behavior: 'smooth' });
-  };
-
-  const handleToggleAnnActive = async (ann) => {
-    try {
-      const updated = !ann.is_active;
-      const res = await client.patch(`/admin/announcements/${ann.id}`, { is_active: updated });
-      setAnnouncements(prev => {
-        const updatedList = prev.map(a => a.id === ann.id ? res.data : a);
-        sessionStorage.setItem('admin_announcements', JSON.stringify(updatedList));
-        return updatedList;
-      });
-      showToast(`Post status updated to ${updated ? 'Active' : 'Hidden'}!`);
-    } catch (err) {
-      showToast(err.response?.data?.error || 'Failed to update status.', 'error');
-    }
-  };
-
-  const [annToDelete, setAnnToDelete] = useState(null);
-
-  const handleDeleteAnn = (annId) => {
-    setAnnToDelete(annId);
-  };
-
-  const confirmDeleteAnn = async () => {
-    if (!annToDelete) return;
-    try {
-      await client.delete(`/admin/announcements/${annToDelete}`);
-      setAnnouncements(prev => {
-        const filtered = prev.filter(a => a.id !== annToDelete);
-        sessionStorage.setItem('admin_announcements', JSON.stringify(filtered));
-        return filtered;
-      });
-      showToast('Announcement deleted.');
-    } catch (err) {
-      showToast(err.response?.data?.error || 'Failed to delete announcement.', 'error');
-    } finally {
-      setAnnToDelete(null);
-    }
-  };
-
-  if (!user) {
-    return (
-      <div className="page-content">
-        <div className="container" style={{ padding: '60px 20px', textAlignment: 'center' }}>
-          <div className="card" style={{ maxWidth: 480, margin: '0 auto', padding: '36px', textAlign: 'center' }}>
-            <div className="skeleton skeleton-text-lg" style={{ width: '60%', margin: '0 auto 16px' }}></div>
-            <div className="skeleton skeleton-text" style={{ width: '80%', margin: '0 auto' }}></div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isAdmin) {
-    return (
-      <div className="page-content">
-        <div className="container" style={{ padding: '60px 20px' }}>
-          <div className="card" style={{ maxWidth: 520, margin: '0 auto', padding: '40px 32px', textAlign: 'center', borderRadius: 'var(--radius-lg)' }}>
-            <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#fee2e2', color: '#dc2626', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
-              <Shield size={32} />
-            </div>
-            <h2 style={{ fontSize: 22, fontWeight: 800, color: 'var(--color-text)', marginBottom: 8 }}>Admin Access Restricted</h2>
-            <p style={{ fontSize: 14, color: 'var(--color-text-muted)', lineHeight: 1.6, marginBottom: 24 }}>
-              You are currently logged in as <strong>{user.name}</strong> ({user.role || 'student'}). The Admin Panel is exclusively accessible to Faculty & Administrators.
-            </p>
-            <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
-              <Link to="/" className="btn btn-primary">Return to Home Page →</Link>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const isAdmin = Boolean(user && (user.is_admin || user.role === 'admin' || user.role === 'faculty'));
+  const isFullAdmin = Boolean(user && (user.role === 'admin' || user.is_admin || user.is_hod || user.designation?.toUpperCase() === 'HOD'));
 
   const totalScore = students.reduce((s, u) => s + u.score, 0);
   const avgScore = students.length ? Math.round(totalScore / students.length) : 0;
 
-  const [rejectingAch, setRejectingAch] = useState(null);
-  const [rejectionReasonInput, setRejectionReasonInput] = useState('');
-  const [processingAchIds, setProcessingAchIds] = useState({});
-
   const verifyAch = async (id, approved) => {
-    if (processingAchIds[id]) return;
-
+    let reason = null;
     if (!approved) {
-      const targetAch = achievements.find(a => a.id === id);
-      if (targetAch) {
-        setRejectingAch(targetAch);
-        setRejectionReasonInput('');
+      reason = window.prompt('Enter reason for rejection:');
+      if (!reason || !reason.trim()) {
+        showToast('Rejection cancelled: reason is required.', 'error');
+        return;
       }
-      return;
     }
 
-    setProcessingAchIds(prev => ({ ...prev, [id]: 'approving' }));
+    const targetAch = achievements.find(a => a.id === id);
+    setAchievements(prev => prev.filter(a => a.id !== id));
+    showToast(approved ? 'Achievement approved ✅' : 'Achievement rejected ✕', approved ? 'success' : 'error');
+    window.dispatchEvent(new Event('pendingUpdated'));
 
     try {
-      await client.patch(`/achievements/${id}/approve`);
-      setAchievements(prev => prev.filter(a => a.id !== id));
-      showToast('Achievement approved ✅', 'success');
+      if (approved) {
+        await client.patch(`/achievements/${id}/approve`);
+      } else {
+        await client.patch(`/achievements/${id}/reject`, { rejection_reason: reason.trim() });
+      }
+    } catch {
+      if (targetAch) setAchievements(prev => [targetAch, ...prev]);
+      showToast('Action failed.', 'error');
       window.dispatchEvent(new Event('pendingUpdated'));
-      window.dispatchEvent(new Event('scoreUpdated'));
-    } catch (err) {
-      showToast(err.response?.data?.error || 'Approval failed.', 'error');
-    } finally {
-      setProcessingAchIds(prev => {
-        const copy = { ...prev };
-        delete copy[id];
-        return copy;
-      });
-    }
-  };
-
-  const handleConfirmReject = async () => {
-    if (!rejectingAch) return;
-    const ach = rejectingAch;
-    if (processingAchIds[ach.id]) return;
-
-    if (!rejectionReasonInput || !rejectionReasonInput.trim()) {
-      showToast('Please enter a rejection reason.', 'error');
-      return;
-    }
-    const reason = rejectionReasonInput.trim();
-    setRejectingAch(null);
-
-    setProcessingAchIds(prev => ({ ...prev, [ach.id]: 'rejecting' }));
-
-    try {
-      await client.patch(`/achievements/${ach.id}/reject`, { rejection_reason: reason });
-      setAchievements(prev => prev.filter(a => a.id !== ach.id));
-      showToast(`✕ Rejected submission for ${ach.student_name}.`, 'error');
-      window.dispatchEvent(new Event('pendingUpdated'));
-      window.dispatchEvent(new Event('scoreUpdated'));
-    } catch (err) {
-      showToast(err.response?.data?.error || 'Rejection failed.', 'error');
-    } finally {
-      setProcessingAchIds(prev => {
-        const copy = { ...prev };
-        delete copy[ach.id];
-        return copy;
-      });
     }
   };
 
@@ -555,15 +348,33 @@ export default function Admin() {
   };
 
   const handleDelete = async (s) => {
-    try {
-      await client.delete(`/admin/students/${s.id}`);
-      setManagedStudents(prev => prev.filter(st => st.id !== s.id));
-      setSelectedIds(prev => { const n = new Set(prev); n.delete(s.id); return n; });
-      setDeleteConfirm(null);
-      showToast(<span><Trash2 size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} /> {s.name} deleted.</span>);
-    } catch {
-      showToast('Failed to delete student.', 'error');
-    }
+    if (!s) return;
+    const targetStudent = s;
+    const targetId = s.id;
+    setDeleteConfirm(null);
+
+    requestUndoableDelete({
+      id: targetId,
+      type: 'Student',
+      label: targetStudent.name || 'Student Profile',
+      itemData: targetStudent,
+      onOptimisticRemove: () => {
+        setManagedStudents(prev => prev.filter(st => st.id !== targetId));
+        setSelectedIds(prev => { const n = new Set(prev); n.delete(targetId); return n; });
+      },
+      onRestore: () => {
+        setManagedStudents(prev => {
+          if (prev.some(st => st.id === targetId)) return prev;
+          return [...prev, targetStudent];
+        });
+      },
+      onCommit: async () => {
+        await client.delete(`/admin/students/${targetId}`);
+      },
+      onFailure: () => {
+        showToast('Failed to delete student.', 'error');
+      }
+    });
   };
 
   const handleBulkDelete = async () => {
@@ -605,8 +416,6 @@ export default function Admin() {
     }
   };
 
-  const isFullAdmin = user?.role === 'admin' || user?.designation?.toUpperCase() === 'HOD';
-
   // Auto-populate filters for restricted advisors
   useEffect(() => {
     if (user && !isFullAdmin) {
@@ -615,12 +424,15 @@ export default function Admin() {
     }
   }, [user, isFullAdmin]);
 
+  if (!isAdmin) return <Navigate to="/" replace />;
+
   const tabs = [
     { id: 'overview', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><BarChart2 size={16} /> Overview</span> },
     { id: 'students', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Users size={16} /> Students</span> },
     { id: 'manage', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Settings size={16} /> Manage</span> },
     ...(isFullAdmin ? [{ id: 'faculty', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><GraduationCap size={16} /> Faculty</span> }] : []),
-    { id: 'post-notify', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Megaphone size={16} /> Post & Notify</span> },
+    { id: 'platforms', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Code size={16} /> Platform Verification</span> },
+    ...(isFullAdmin ? [{ id: 'notify', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Send size={16} /> Post & Notify</span> }] : []),
     { id: 'pending', l: <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Hourglass size={16} /> Pending ({achievements.length})</span> },
   ];
 
@@ -641,7 +453,7 @@ export default function Admin() {
           ))}
         </div>
 
-        {loading && tab === 'overview' ? (
+        {loading && tab !== 'manage' ? (
           <div className="card" style={{ padding: '24px' }}>
             <div className="skeleton skeleton-text-lg" style={{ width: '40%' }}></div>
             <div className="skeleton skeleton-text" style={{ width: '60%' }}></div>
@@ -658,39 +470,77 @@ export default function Admin() {
         ) : (
           <>
             {/* ── OVERVIEW ── */}
-            {tab === 'overview' && (
-              <div className="animate-fadeIn">
-                <div className="admin-stats">
-                  {[
-                    { n: students.length, l: 'Total Students', i: <Users size={28} />, c: 'var(--color-violet)' },
-                    { n: students.reduce((s, u) => s + u.achievement_count, 0), l: 'Total Achievements', i: <Award size={28} />, c: 'var(--color-gold)' },
-                    { n: avgScore, l: 'Avg Score', i: <TrendingUp size={28} />, c: 'var(--color-blue)' },
-                    { n: achievements.length, l: 'Pending Reviews', i: <Hourglass size={28} />, c: 'var(--color-orange)' },
-                  ].map((s, i) => (
-                    <div key={i} className="admin-stat card" style={{ borderTop: `3px solid ${s.c}` }}>
-                      <div>{s.i}</div>
-                      <div style={{ fontSize: 32, fontWeight: 900, fontFamily: "'Space Grotesk', sans-serif", color: s.c }}>{s.n}</div>
-                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>{s.l}</div>
-                    </div>
-                  ))}
-                </div>
+            {tab === 'overview' && (() => {
+              const totalStudentsCount = overviewStats?.totalStudents ?? students.length;
+              const totalAchievementsCount = overviewStats?.totalAchievements ?? students.reduce((s, u) => s + (u.achievement_count || 0), 0);
+              const computedAvg = overviewStats?.avgScore ?? (students.length ? Number((students.reduce((sum, s) => sum + (s.score || 0), 0) / students.length).toFixed(2)) : 0);
+              const topStudents = overviewStats?.topStudents && overviewStats.topStudents.length > 0
+                ? overviewStats.topStudents 
+                : [];
 
-                <div className="card" style={{ padding: '20px 24px', marginTop: 20 }}>
-                  <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 6 }}><List size={18} /> Top 5 Students by Score</h3>
-                  {students.slice(0, 5).map((s, i) => (
-                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-                      <span style={{ fontWeight: 700, fontSize: 16, minWidth: 24 }}>#{i + 1}</span>
-                      <div style={{ width: 36, height: 36, background: 'var(--gradient-primary)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, color: '#fff' }}>{s.name[0]}</div>
-                      <div style={{ flex: 1 }}>
-                        <Link to={`/profile/${s.id}`} style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)' }}>{s.name}</Link>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{s.class} · {s.batch || 'No batch'}</div>
+              return (
+                <div className="animate-fadeIn">
+                  <div className="admin-stats">
+                    {[
+                      { n: totalStudentsCount, l: 'Total Students', i: <Users size={28} />, c: 'var(--color-violet)' },
+                      { n: totalAchievementsCount, l: 'Total Achievements', i: <Award size={28} />, c: 'var(--color-gold)' },
+                      { n: computedAvg, l: 'Avg Score', i: <TrendingUp size={28} />, c: 'var(--color-blue)' },
+                      { n: achievements.length, l: 'Pending Reviews', i: <Hourglass size={28} />, c: 'var(--color-orange)' },
+                    ].map((s, i) => (
+                      <div key={i} className="admin-stat card" style={{ borderTop: `3px solid ${s.c}` }}>
+                        <div>{s.i}</div>
+                        <div style={{ fontSize: 32, fontWeight: 900, fontFamily: "'Space Grotesk', sans-serif", color: s.c }}>{s.n}</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>{s.l}</div>
                       </div>
-                      <span style={{ fontWeight: 800, color: 'var(--color-gold)', fontFamily: "'Space Grotesk', sans-serif" }}>{s.score} pts</span>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 20, marginTop: 20 }}>
+                    <div className="card" style={{ padding: '20px 24px' }}>
+                      <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 6 }}><List size={18} /> Top 5 Students by Score</h3>
+                      {topStudents.length === 0 ? (
+                        <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>No student records found.</div>
+                      ) : (
+                        topStudents.map((s, i) => (
+                          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+                            <span style={{ fontWeight: 700, fontSize: 16, minWidth: 24 }}>#{i + 1}</span>
+                            <div style={{ width: 36, height: 36, background: 'var(--gradient-primary)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, color: '#fff' }}>{s.name[0]}</div>
+                            <div style={{ flex: 1 }}>
+                              <Link to={`/profile/${s.id}`} style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)' }}>{s.name}</Link>
+                              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{s.class} · {s.batch || 'No batch'}</div>
+                            </div>
+                            <span style={{ fontWeight: 800, color: 'var(--color-gold)', fontFamily: "'Space Grotesk', sans-serif" }}>{s.score} pts</span>
+                          </div>
+                        ))
+                      )}
                     </div>
-                  ))}
+
+                  <div className="card" style={{ padding: '20px 24px' }}>
+                    <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 6 }}><Award size={18} /> Recent Approved Achievements</h3>
+                    {recentApproved.length === 0 ? (
+                      <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        No approved achievements found yet.
+                      </div>
+                    ) : (
+                      recentApproved.map((a) => (
+                        <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+                          <div style={{ width: 36, height: 36, background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.25)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#10b981', flexShrink: 0 }}>
+                            <CheckCircle size={18} />
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.title}</div>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                              {a.student_name} ({a.class || 'Student'}) · <span style={{ color: 'var(--color-gold)', fontWeight: 600 }}>+{a.points || 0} pts</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
-            )}
+            );
+          })()}
 
             {/* ── STUDENTS (view-only) ── */}
             {tab === 'students' && (
@@ -858,7 +708,7 @@ export default function Admin() {
                       <span>Class</span>
                       <span>Batch</span>
                       <span>DOB</span>
-                      <span>Actions</span>
+                      <span>Action</span>
                     </div>
 
                     {managedStudents.map((s, i) => (
@@ -878,29 +728,36 @@ export default function Admin() {
                           <div /> 
                         )}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                          <div style={{ width: 34, height: 34, background: 'var(--color-green)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, color: '#fff', fontSize: 13, flexShrink: 0 }}>
+                          <div style={{ width: 34, height: 34, background: 'var(--btn-primary-bg)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, color: 'var(--btn-primary-color)', fontSize: 13, flexShrink: 0 }}>
                             {s.name[0]}
                           </div>
                           <div style={{ minWidth: 0 }}>
-                            <Link to={`/profile/${s.id}`} style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</Link>
+                            <Link to={`/profile/${s.id}`} style={{ fontSize: 14, fontWeight: 700, color: 'var(--color-text)', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</Link>
                             <div style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.email}</div>
                           </div>
                         </div>
-                        <span style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.roll_no}</span>
+                        <span style={{ fontFamily: 'monospace', fontSize: 12.5, fontWeight: 700, color: 'var(--color-text)' }}>{s.roll_no}</span>
                         <span><span className="badge badge-violet">{s.class}</span></span>
                         <span><span className="badge badge-blue">{s.batch}</span></span>
                         <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{s.date_of_birth || '—'}</span>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'nowrap' }}>
-                          <button className="btn btn-ghost btn-sm" title="Edit student" onClick={() => setEditStudent(s)}><Edit3 size={16} /></button>
-                          <button className="btn btn-ghost btn-sm" title="Reset password to default" onClick={() => handleResetPassword(s)}><Key size={16} /></button>
-                          <button className="btn btn-danger btn-sm" title="Delete student" onClick={() => setDeleteConfirm(s)}><Trash2 size={16} /></button>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'nowrap', position: 'relative', zIndex: 5 }}>
+                          <SplitActions
+                            primaryLabel="Manage"
+                            primaryIcon={Edit3}
+                            onPrimaryClick={() => setEditStudent(s)}
+                            dropdownActions={[
+                              { label: 'Reset Password', icon: Key, onClick: () => handleResetPassword(s) },
+                              { label: 'Delete Student', icon: Trash2, onClick: () => setDeleteConfirm(s), destructive: true }
+                            ]}
+                            ariaLabel="More student actions"
+                          />
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
 
-                <div style={{ marginTop: 12, fontSize: 13, color: 'var(--color-text-muted)' }}>
+                <div style={{ marginTop: 12, fontSize: 13, color: '#94a3b8' }}>
                   Showing <strong>{managedStudents.length}</strong> student{managedStudents.length !== 1 ? 's' : ''}
                   {selectedIds.size > 0 && <> · <strong>{selectedIds.size}</strong> selected</>}
                 </div>
@@ -911,7 +768,7 @@ export default function Admin() {
               <div className="animate-fadeIn">
                 <div className="section-header" style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <h3 style={{ fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}><GraduationCap size={20} /> CSE Faculty & Advisors</h3>
+                    <h3 style={{ fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6, color: 'var(--color-text)' }}><GraduationCap size={20} /> CSE Faculty & Advisors</h3>
                     <p style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Assigned class advisors have admin privileges for their specific class.</p>
                   </div>
                   <button className="btn btn-primary" onClick={() => setShowAddFacModal(true)} style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Plus size={16} /> Add Faculty</button>
@@ -934,7 +791,7 @@ export default function Admin() {
                   </div>
                 ) : (
                   <div className="card" style={{ overflow: 'hidden' }}>
-                    <div className="manage-table-header" style={{ gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 80px' }}>
+                    <div className="manage-table-header" style={{ gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 140px' }}>
                       <span>Faculty Name</span>
                       <span>Designation</span>
                       <span>Department</span>
@@ -943,14 +800,28 @@ export default function Admin() {
                       <span>Manage</span>
                     </div>
                     {faculties.map((f, i) => (
-                      <div key={f.id} className="manage-table-row" style={{ gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 80px', animation: `fadeInUp 0.3s ease ${i * 0.02}s both` }}>
-                        <div style={{ fontWeight: 600 }}>{f.name}</div>
+                      <div key={f.id} className="manage-table-row" style={{ gridTemplateColumns: '1.5fr 1fr 1fr 1fr 1fr 140px', animation: `fadeInUp 0.3s ease ${i * 0.02}s both` }}>
+                        <div style={{ fontWeight: 700, color: 'var(--color-text)' }}>{f.name}</div>
                         <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{f.designation || '—'}</div>
-                        <div style={{ fontSize: 13 }}>{f.department || 'CSE'}</div>
-                        <div>{f.advising_class ? <span className="badge badge-green">{f.advising_class}</span> : <span style={{ color: 'var(--color-text-faint)' }}>—</span>}</div>
-                        <div>{f.advising_batch ? <span className="badge badge-violet">{f.advising_batch}</span> : <span style={{ color: 'var(--color-text-faint)' }}>—</span>}</div>
-                        <div>
-                          <button className="btn btn-primary btn-sm" onClick={() => setEditFaculty(f)}>Adjust</button>
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{f.department || 'CSE'}</div>
+                        <div>{f.advising_class ? <span className="badge badge-green">{f.advising_class}</span> : <span style={{ color: 'var(--color-text-muted)' }}>—</span>}</div>
+                        <div>{f.advising_batch ? <span className="badge badge-violet">{f.advising_batch}</span> : <span style={{ color: 'var(--color-text-muted)' }}>—</span>}</div>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', position: 'relative', zIndex: 5 }}>
+                          <SplitActions
+                            primaryLabel="Adjust"
+                            primaryIcon={Edit3}
+                            onPrimaryClick={() => setEditFaculty(f)}
+                            dropdownActions={[
+                              {
+                                label: 'Delete Faculty',
+                                icon: Trash2,
+                                onClick: () => setDeleteFacultyTarget(f),
+                                destructive: true,
+                                hidden: !isFullAdmin || f.user_id === user?.id || f.id === user?.id
+                              }
+                            ]}
+                            ariaLabel="More faculty actions"
+                          />
                         </div>
                       </div>
                     ))}
@@ -967,462 +838,452 @@ export default function Admin() {
         />
       )}
 
-            {/* ── POST & NOTIFY ── */}
-            {tab === 'post-notify' && (
-              <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-
-                {/* Neat Publishing Form */}
-                <div className="card" style={{ padding: '28px', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-sm)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, paddingBottom: 16, borderBottom: '1px solid var(--border)' }}>
-                    <div>
-                      <h3 style={{ fontSize: 17, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <Send size={18} color="var(--color-green)" /> {editingAnnId ? 'Edit Announcement' : 'Publish New Post / Announcement'}
-                      </h3>
-                      <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                        {editingAnnId ? 'Update details of your existing published news.' : 'Fill out the form below to broadcast news to all students.'}
-                      </p>
+            {/* ── PENDING ACHIEVEMENTS ── */}
+            {tab === 'pending' && (
+              <div className="animate-fadeIn">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+                  <p style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
+                    Review pending student submissions or switch to the dedicated inspection portal.
+                  </p>
+                  <Link to="/approvals" className="btn btn-primary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <CheckCircle size={15} /> Open Full Approvals Portal →
+                  </Link>
+                </div>
+                {achievements.length === 0 ? (
+                  <div className="empty-state">
+                    <div className="empty-icon" style={{ marginBottom: '16px' }}>
+                      <Inbox size={48} color="var(--color-green)" strokeWidth={1.5} opacity={0.6} />
                     </div>
-                    {editingAnnId && (
-                      <button className="btn btn-ghost btn-sm" onClick={() => {
-                        setEditingAnnId(null);
-                        setPostTitle('');
-                        setPostCategory('Hackathon Winner');
-                        setPostImageUrl('');
-                        setPostFile(null);
-                        setPostFilePreview(null);
-                        setPostFileError(null);
-                        setPostContent('');
-                        setPostIsActive(true);
-                      }}>
-                        ✕ Cancel Editing
-                      </button>
-                    )}
+                    <h3>All caught up!</h3>
+                    <p>No pending achievement reviews.</p>
                   </div>
-
-                  <form onSubmit={handleSaveAnnouncement} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                    {/* Category Selection Pills */}
-                    <div>
-                      <label className="form-label" style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, display: 'block', color: 'var(--color-text)' }}>
-                        Select Category Tag *
-                      </label>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                        {CATEGORIES.map(cat => {
-                          const isSelected = postCategory === cat;
-                          const isImportant = cat === 'Important';
-                          return (
-                            <button
-                              key={cat}
-                              type="button"
-                              onClick={() => setPostCategory(cat)}
-                              className={`btn btn-sm ${isImportant ? (isSelected ? 'btn-danger' : 'btn-secondary') : (isSelected ? 'btn-primary' : 'btn-secondary')}`}
-                              style={{
-                                borderRadius: 20,
-                                padding: '6px 16px',
-                                fontSize: 13,
-                                fontWeight: isSelected ? 700 : 500,
-                                transition: 'all 0.2s ease',
-                                ...(isImportant ? {
-                                  color: isSelected ? '#FFFFFF' : '#DC2626',
-                                  background: isSelected ? '#DC2626' : '#FEF2F2',
-                                  borderColor: isSelected ? '#DC2626' : '#FECACA',
-                                  boxShadow: isSelected ? '0 2px 10px rgba(220, 38, 38, 0.35)' : 'none'
-                                } : {
-                                  boxShadow: isSelected ? '0 2px 8px rgba(34, 197, 94, 0.25)' : 'none'
-                                })
-                              }}
-                            >
-                              {isImportant ? '🚨 Important' : cat}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Headline Input */}
-                    <div>
-                      <label className="form-label" style={{ fontSize: 13, fontWeight: 700, marginBottom: 6, display: 'block' }}>
-                        News Title / Headline *
-                      </label>
-                      <input
-                        type="text"
-                        className="input"
-                        placeholder="e.g. Team Inceptron Secures 1st Prize at National Hackathon 2026! 🎉"
-                        value={postTitle}
-                        onChange={e => setPostTitle(e.target.value)}
-                        required
-                        style={{ fontSize: 15, padding: '12px 16px', fontWeight: 600 }}
-                      />
-                    </div>
-
-                    {/* Post Image Upload / URL & Live Preview */}
-                    <div>
-                      <label className="form-label" style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, display: 'block' }}>
-                        Post Image <span style={{ fontWeight: 400, color: 'var(--color-text-muted)' }}>(Winner poster, event photo or banner)</span>
-                      </label>
-                      
-                      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${postUploadMode === 'file' ? 'btn-primary' : 'btn-secondary'}`}
-                          onClick={() => setPostUploadMode('file')}
-                        >
-                          Choose Image
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${postUploadMode === 'url' ? 'btn-primary' : 'btn-secondary'}`}
-                          onClick={() => setPostUploadMode('url')}
-                        >
-                          Paste Image URL
-                        </button>
-                      </div>
-
-                      {postUploadMode === 'file' ? (
-                        <div>
-                          {!postFile ? (
-                            <label style={{
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              padding: '18px',
-                              border: '2px dashed var(--border)',
-                              borderRadius: 'var(--radius-md)',
-                              cursor: 'pointer',
-                              background: 'var(--color-bg-alt, #f8fafc)',
-                              transition: 'all 0.2s'
-                            }}>
-                              <Image size={24} style={{ marginBottom: 6, color: 'var(--color-text-muted)' }} />
-                              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>Click to Choose Image File</span>
-                              <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                                Supported: JPG, PNG, WEBP (Max 5MB)
-                              </span>
-                              <input
-                                type="file"
-                                accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-                                onChange={handlePostFileChange}
-                                style={{ display: 'none' }}
-                              />
-                            </label>
-                          ) : (
-                            <div style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justify: 'space-between',
-                              padding: '10px 14px',
-                              background: 'var(--color-bg-alt, #f8fafc)',
-                              border: '1px solid var(--border)',
-                              borderRadius: 'var(--radius-md)'
-                            }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 12, overflow: 'hidden' }}>
-                                {postFilePreview && (
-                                  <img src={postFilePreview} alt="Preview" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border)' }} />
-                                )}
-                                <div style={{ minWidth: 0 }}>
-                                  <div style={{ fontSize: 13, fontWeight: 600, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                                    Selected: {postFile.name}
-                                  </div>
-                                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                    {(postFile.size / (1024 * 1024)).toFixed(2)} MB
-                                  </div>
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-sm"
-                                onClick={removePostFile}
-                                style={{ color: '#ef4444', padding: '4px 8px' }}
-                              >
-                                Remove image
-                              </button>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {achievements.map(a => (
+                      <div key={a.id} className="card" style={{ padding: '18px 20px' }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                              <span className={`badge type-${a.type} badge`}>{a.type}</span>
+                              <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>by {a.student_name} ({a.roll_no})</span>
                             </div>
-                          )}
-
-                          {postFileError && (
-                            <div style={{ marginTop: 8, fontSize: 12, color: '#dc2626', fontWeight: 500 }}>
-                              {postFileError}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <input
-                          type="url"
-                          className="input"
-                          placeholder="https://images.unsplash.com/photo-1531482615713-2afd69097998?w=800"
-                          value={postImageUrl}
-                          onChange={e => setPostImageUrl(e.target.value)}
-                          style={{ fontSize: 14, padding: '10px 14px' }}
-                        />
-                      )}
-
-                      {(postImageUrl || postFilePreview) ? (
-                        <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 16, background: 'var(--bg-hover)', padding: 12, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
-                          <img
-                            src={postFilePreview || postImageUrl}
-                            alt="Live Preview"
-                            style={{ width: 100, height: 65, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--border)' }}
-                            onError={(e) => { e.target.style.display = 'none'; }}
-                          />
-                          <div>
-                            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-green)' }}>✓ Live Image Preview Ready</div>
-                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>This image will appear on the left side of the news section.</div>
+                            <h4 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>{a.title}</h4>
+                            {a.description && <p style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{a.description}</p>}
+                            {a.proof_url && <a href={a.proof_url} target="_blank" rel="noopener noreferrer" className="badge badge-violet" style={{ marginTop: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}><ExternalLink size={12} /> View Proof</a>}
+                          </div>
+                          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                            <button className="btn btn-primary btn-sm" onClick={() => verifyAch(a.id, true)} style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Check size={14} /> Verify</button>
+                            <button className="btn btn-danger btn-sm" onClick={() => verifyAch(a.id, false)} style={{ display: 'flex', alignItems: 'center', gap: 4 }}><X size={14} /> Reject</button>
                           </div>
                         </div>
-                      ) : (
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>
-                          💡 Tip: If left empty, the post will render cleanly in a full-width text layout on the Student Portal.
-                        </div>
-                      )}
-                    </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
-                    {/* News Body Text */}
-                    <div>
-                      <label className="form-label" style={{ fontSize: 13, fontWeight: 700, marginBottom: 6, display: 'block' }}>
-                        News Message Content *
-                      </label>
-                      <textarea
-                        className="input"
-                        rows={5}
-                        placeholder="Describe the achievement, team members, prize details, guidelines, or event date..."
-                        value={postContent}
-                        onChange={e => setPostContent(e.target.value)}
-                        required
-                        style={{ fontFamily: 'inherit', resize: 'vertical', fontSize: 14, lineHeight: 1.6 }}
-                      />
+            {/* ── PLATFORM VERIFICATION ── */}
+            {tab === 'platforms' && (
+              <div className="animate-fadeIn">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 24 }}>
+                  <div className="card" style={{ padding: '16px 20px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>Total Connections</div>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--color-text)', marginTop: 4 }}>{platformConnections.length}</div>
+                  </div>
+                  <div className="card" style={{ padding: '16px 20px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>Verified Profiles</div>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--color-green)', marginTop: 4 }}>{platformConnections.filter(c => c.ownershipVerified).length}</div>
+                  </div>
+                  <div className="card" style={{ padding: '16px 20px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>Active Students</div>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--color-text)', marginTop: 4 }}>{[...new Set(platformConnections.map(c => c.userId))].length}</div>
+                  </div>
+                  <div className="card" style={{ padding: '16px 20px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>Sync Failures</div>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: platformConnections.filter(c => c.status === 'sync_error' || c.status === 'error').length > 0 ? '#ef4444' : 'var(--color-green)', marginTop: 4 }}>
+                      {platformConnections.filter(c => c.status === 'sync_error' || c.status === 'error').length}
                     </div>
-
-                    {/* Controls Footer */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 14, fontWeight: 600 }}>
-                        <input
-                          type="checkbox"
-                          checked={postIsActive}
-                          onChange={e => setPostIsActive(e.target.checked)}
-                          style={{ width: 18, height: 18, accentColor: 'var(--color-green)', cursor: 'pointer' }}
-                        />
-                        <span>Publish & Show in Student Portal Home</span>
-                      </label>
-
-                      <button
-                        type="submit"
-                        className="btn btn-primary btn-lg"
-                        disabled={publishing}
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '12px 28px', fontSize: 15, fontWeight: 700 }}
-                      >
-                        <Send size={18} /> {publishing ? 'Publishing...' : editingAnnId ? 'Update Post' : 'Publish Announcement'}
-                      </button>
-                    </div>
-                  </form>
+                  </div>
                 </div>
 
-                {/* Published Posts Grid / Table */}
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
-                    <h3 style={{ fontSize: 18, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <FileText size={20} color="var(--color-green)" /> Published Announcements ({announcements.length})
-                    </h3>
-                    <button className="btn btn-secondary btn-sm" onClick={loadAnnouncements} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <RefreshCw size={14} /> Refresh List
-                    </button>
-                  </div>
-
-                  {annLoading ? (
-                    <div className="card" style={{ padding: 28 }}>
-                      <div className="skeleton skeleton-text" style={{ width: '60%', height: 24, marginBottom: 12 }}></div>
-                      <div className="skeleton skeleton-text" style={{ width: '80%', height: 16 }}></div>
-                    </div>
-                  ) : announcements.length === 0 ? (
-                    <div className="empty-state card" style={{ padding: '48px 24px', textAlignment: 'center' }}>
-                      <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'var(--green-50)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
-                        <Megaphone size={32} color="var(--color-green)" />
-                      </div>
-                      <h4 style={{ fontSize: 18, fontWeight: 700 }}>No Posts Published Yet</h4>
-                      <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginTop: 6, maxWidth: 460, margin: '6px auto 0' }}>
-                        Create your first post using the form above. It will instantly appear on the Home page news section!
+                <div className="card" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--color-card)', border: '1px solid var(--color-border)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
+                    <div>
+                      <h2 style={{ fontSize: 18, fontWeight: 800, margin: 0, color: 'var(--color-text)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Code size={20} className="text-gradient" /> Platform Connection Verification
+                      </h2>
+                      <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>
+                        Review student programming platform handles, sync health, and competitive score metrics.
                       </p>
                     </div>
+
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <input
+                        type="text"
+                        placeholder="Search student, handle..."
+                        value={platSearch}
+                        onChange={(e) => setPlatSearch(e.target.value)}
+                        className="form-input"
+                        style={{ width: 180, padding: '8px 12px', fontSize: 13 }}
+                      />
+                      <select
+                        value={platStatusFilter}
+                        onChange={(e) => setPlatStatusFilter(e.target.value)}
+                        className="form-select"
+                        style={{ width: 150, padding: '8px 12px', fontSize: 13 }}
+                      >
+                        <option value="all">All Statuses</option>
+                        <option value="pending">Pending Verification</option>
+                        <option value="verified">Verified</option>
+                      </select>
+                      <select
+                        value={platPlatformFilter}
+                        onChange={(e) => setPlatPlatformFilter(e.target.value)}
+                        className="form-select"
+                        style={{ width: 150, padding: '8px 12px', fontSize: 13 }}
+                      >
+                        <option value="all">All Platforms</option>
+                        <option value="codeforces">Codeforces</option>
+                        <option value="leetcode">LeetCode</option>
+                        <option value="hackerrank">HackerRank</option>
+                        <option value="geeksforgeeks">GeeksforGeeks</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {platLoading ? (
+                    <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>
+                      <RefreshCw size={24} className="spin" style={{ marginBottom: 8 }} />
+                      <div>Loading platform connections...</div>
+                    </div>
                   ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
-                      {announcements.map(a => {
-                        const isImportant = a.category === 'Important';
-                        return (
-                          <div key={a.id} className={`card card-hover ${isImportant ? 'news-card-important' : ''}`} style={{ padding: '20px 24px', display: 'grid', gridTemplateColumns: '110px 1fr auto', gap: 20, alignItems: 'center' }}>
-                            {/* Image Thumbnail */}
-                            {a.image_url ? (
-                              <img
-                                src={a.image_url}
-                                alt={a.title}
-                                style={{ width: 110, height: 80, objectFit: 'cover', borderRadius: 10, border: isImportant ? '1.5px solid #FCA5A5' : '1px solid var(--border)' }}
-                                onError={(e) => { e.target.src = '/inceptron-logo.png'; }}
-                              />
-                            ) : (
-                              <div style={{ width: 110, height: 80, borderRadius: 10, background: isImportant ? '#FEF2F2' : 'var(--bg-hover)', border: isImportant ? '1.5px solid #FCA5A5' : '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                <img src="/inceptron-logo.png" alt="Inceptron" style={{ width: 54, opacity: 0.8 }} />
-                              </div>
-                            )}
-
-                            {/* Post Details */}
-                            <div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
-                                <span className={`badge ${isImportant ? 'badge-important' : 'badge-gold'}`} style={{ fontSize: 12, fontWeight: 700, padding: '3px 10px' }}>
-                                  {isImportant ? '🚨 Important' : (a.category || 'General')}
-                                </span>
-                                <span className={`badge ${a.is_active ? 'badge-green' : 'badge-red'}`} style={{ fontSize: 12, fontWeight: 600, padding: '3px 10px' }}>
-                                  {a.is_active ? '● Active in Portal' : '○ Hidden'}
-                                </span>
-                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                  {new Date(a.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
-                                </span>
-                              </div>
-                              <h4 style={{ fontSize: 16, fontWeight: 800, color: isImportant ? '#DC2626' : 'var(--color-text)', marginBottom: 6 }}>{a.title}</h4>
-                              <p style={{ fontSize: 13, color: isImportant ? '#991B1B' : 'var(--color-text-muted)', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, lineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                                {a.content}
-                              </p>
-                            </div>
-
-                          {/* Action Buttons */}
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end', flexShrink: 0 }}>
-                            <button
-                              className={`btn btn-sm ${a.is_active ? 'btn-ghost' : 'btn-primary'}`}
-                              onClick={() => handleToggleAnnActive(a)}
-                              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 100, justifyContent: 'center' }}
-                            >
-                              {a.is_active ? <EyeOff size={14} /> : <Eye size={14} />} {a.is_active ? 'Hide Post' : 'Show Post'}
-                            </button>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => handleEditAnn(a)}
-                                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                              >
-                                <Edit3 size={14} /> Edit
-                              </button>
-                              <button
-                                className="btn btn-danger btn-sm"
-                                onClick={() => handleDeleteAnn(a.id)}
-                                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ borderBottom: '1px solid var(--color-border)', textAlign: 'left', color: 'var(--color-text-muted)' }}>
+                            <th style={{ padding: '10px 12px' }}>Student</th>
+                            <th style={{ padding: '10px 12px' }}>Class / Batch</th>
+                            <th style={{ padding: '10px 12px' }}>Platform</th>
+                            <th style={{ padding: '10px 12px' }}>Handle</th>
+                            <th style={{ padding: '10px 12px' }}>Status</th>
+                            <th style={{ padding: '10px 12px' }}>Last Sync</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'right' }}>Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {platformConnections
+                            .filter(c => {
+                              if (platStatusFilter === 'pending' && c.ownershipVerified) return false;
+                              if (platStatusFilter === 'verified' && !c.ownershipVerified) return false;
+                              if (platPlatformFilter !== 'all' && c.platformCode !== platPlatformFilter) return false;
+                              if (platSearch.trim()) {
+                                const q = platSearch.toLowerCase().trim();
+                                const nameMatch = (c.studentName || '').toLowerCase().includes(q);
+                                const rollMatch = (c.rollNo || '').toLowerCase().includes(q);
+                                const handleMatch = (c.handle || '').toLowerCase().includes(q);
+                                if (!nameMatch && !rollMatch && !handleMatch) return false;
+                              }
+                              return true;
+                            })
+                            .map((conn) => (
+                              <tr key={`${conn.userId}-${conn.platformCode}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                <td style={{ padding: '12px' }}>
+                                  <div style={{ fontWeight: 700, color: 'var(--color-text)' }}>{conn.studentName}</div>
+                                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{conn.rollNo || conn.userId}</div>
+                                </td>
+                                <td style={{ padding: '12px', color: 'var(--color-text-muted)' }}>
+                                  {conn.class || '—'} · {conn.batch || '—'}
+                                </td>
+                                <td style={{ padding: '12px', fontWeight: 700, textTransform: 'capitalize', color: 'var(--color-green)' }}>
+                                  {conn.platformCode}
+                                </td>
+                                <td style={{ padding: '12px', fontWeight: 600, color: 'var(--color-blue, #60a5fa)' }}>
+                                  @{conn.handle}
+                                </td>
+                                <td style={{ padding: '12px' }}>
+                                  {conn.ownershipVerified ? (
+                                    <span className="badge" style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--green-100)', color: 'var(--color-green)', border: '1px solid var(--border-strong)' }}>
+                                      <CheckCircle size={12} /> Verified
+                                    </span>
+                                  ) : (
+                                    <span className="badge" style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                                      Connected
+                                    </span>
+                                  )}
+                                </td>
+                                <td style={{ padding: '12px', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                  {conn.lastSyncedAt ? new Date(conn.lastSyncedAt).toLocaleString() : 'Never'}
+                                </td>
+                                <td style={{ padding: '12px', textAlign: 'right' }}>
+                                  <SplitActions
+                                    primaryLabel={conn.ownershipVerified ? 'Verified' : 'Verify'}
+                                    primaryIcon={CheckCircle}
+                                    onPrimaryClick={() => handleAdminVerifyPlatform(conn.userId, conn.platformCode, !conn.ownershipVerified)}
+                                    dropdownActions={[
+                                      {
+                                        label: conn.ownershipVerified ? 'Unverify Connection' : 'Verify Handle',
+                                        icon: conn.ownershipVerified ? X : CheckCircle,
+                                        onClick: () => handleAdminVerifyPlatform(conn.userId, conn.platformCode, !conn.ownershipVerified),
+                                        destructive: conn.ownershipVerified
+                                      }
+                                    ]}
+                                    ariaLabel="More platform actions"
+                                  />
+                                </td>
+                              </tr>
+                            ))}
+                          {platformConnections.length === 0 && (
+                            <tr>
+                              <td colSpan={7} style={{ padding: 24, textAlign: 'center', color: '#94a3b8' }}>
+                                No platform connections found.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   )}
                 </div>
               </div>
             )}
 
-            {/* ── PENDING ACHIEVEMENTS ── */}
-            {tab === 'pending' && (
-              <div className="animate-fadeIn" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                <div className="card" style={{ padding: '24px 28px', background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.12) 0%, rgba(168, 85, 247, 0.08) 100%)', border: '1.5px solid var(--color-green)', borderRadius: 'var(--radius-lg)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
-                    <div>
-                      <h3 style={{ fontSize: 20, fontWeight: 800, color: 'var(--color-text)', display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <CheckCircle size={24} color="var(--color-green)" /> Pending Achievements & Submissions ({achievements.length})
-                      </h3>
-                      <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                        Review, verify, or reject student achievement claims (hackathons, internships, certifications).
-                      </p>
-                    </div>
-                  </div>
+            {/* ── POST & NOTIFY ── */}
+            {tab === 'notify' && isFullAdmin && (
+              <div className="card animate-fadeIn" style={{ padding: '28px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '16px', boxShadow: 'var(--shadow-md)' }}>
+                <div style={{ marginBottom: 24 }}>
+                  <h2 style={{ fontSize: 20, fontWeight: 800, color: 'var(--color-text)', display: 'flex', alignItems: 'center', gap: 10, margin: 0 }}>
+                    <Send size={22} style={{ color: 'var(--color-green)' }} /> Post & Notify Department
+                  </h2>
+                  <p style={{ fontSize: 13.5, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    Broadcast departmental announcements, hackathons, internships, or notices to students and faculty.
+                  </p>
                 </div>
 
-                {pendingLoading && achievements.length === 0 ? (
-                  <div className="card" style={{ padding: '48px 24px', textAlign: 'center' }}>
-                    <RefreshCw size={32} className="spin" color="var(--color-green)" style={{ margin: '0 auto 12px' }} />
-                    <h3 style={{ fontSize: 16, fontWeight: 600 }}>Loading pending submissions...</h3>
-                  </div>
-                ) : pendingError && achievements.length === 0 ? (
-                  <div className="card" style={{ padding: '36px 24px', textAlign: 'center', borderColor: 'var(--color-red)' }}>
-                    <XCircle size={36} color="var(--color-red)" style={{ margin: '0 auto 12px' }} />
-                    <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-text)' }}>Unable to load pending submissions.</h3>
-                    <button className="btn btn-outline btn-sm" onClick={() => {
-                      const currentSeq = ++pendingSeqRef.current;
-                      setPendingLoading(true);
-                      setPendingError(null);
-                      client.get('/achievements/all/pending')
-                        .then(res => {
-                          if (currentSeq >= pendingSeqRef.current) setAchievements(res.data || []);
-                        })
-                        .catch(() => {
-                          if (currentSeq >= pendingSeqRef.current) setPendingError('Unable to load pending submissions.');
-                        })
-                        .finally(() => {
-                          if (currentSeq >= pendingSeqRef.current) setPendingLoading(false);
-                        });
-                    }} style={{ marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <RefreshCw size={14} /> Retry
-                    </button>
-                  </div>
-                ) : achievements.length === 0 ? (
-                  <div className="empty-state card" style={{ padding: '48px 24px', textAlignment: 'center' }}>
-                    <div className="empty-icon" style={{ marginBottom: '16px' }}>
-                      <Inbox size={48} color="var(--color-green)" strokeWidth={1.5} opacity={0.6} />
+                <form onSubmit={handleSendNotification} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label" style={{ color: 'var(--color-text-muted)', fontWeight: 700 }}>Announcement Title *</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="e.g. SIET CSE Hackathon 2026 Registrations Open"
+                        value={notifyForm.title}
+                        onChange={e => setNotifyForm(prev => ({ ...prev, title: e.target.value }))}
+                        style={{ background: 'var(--bg-input)', borderColor: 'var(--border)', color: 'var(--color-text)' }}
+                        required
+                      />
                     </div>
-                    <h3 style={{ fontSize: 18, fontWeight: 700 }}>All caught up!</h3>
-                    <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginTop: 4 }}>No pending achievement reviews at this moment.</p>
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    {achievements.map(a => {
-                      const isProcessing = Boolean(processingAchIds[a.id]);
-                      const procType = processingAchIds[a.id];
-                      return (
-                        <div key={a.id} className="card" style={{ padding: '18px 20px', opacity: isProcessing ? 0.7 : 1 }}>
-                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                            <div style={{ flex: 1, minWidth: 260 }}>
-                              <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                                <span className={`badge type-${a.type} badge`}>{a.type}</span>
-                                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
-                                  {a.student_name} ({a.roll_no || '—'})
-                                </span>
-                                {(a.class || a.batch) && (
-                                  <span className="badge badge-subtle" style={{ fontSize: 11 }}>
-                                    {[a.class, a.batch].filter(Boolean).join(' • ')}
-                                  </span>
-                                )}
-                              </div>
-                              <h4 style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{a.title}</h4>
-                              {a.description && <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>{a.description}</p>}
-                              
-                              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                                {a.position && <span><strong>Position:</strong> {a.position}</span>}
-                                {a.duration && <span><strong>Duration:</strong> {a.duration}</span>}
-                                {a.created_at && <span><strong>Submitted:</strong> {new Date(a.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</span>}
-                              </div>
 
-                              {a.proof_url && (
-                                <a href={a.proof_url} target="_blank" rel="noopener noreferrer" className="badge badge-violet" style={{ marginTop: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                  <ExternalLink size={12} /> View Proof
-                                </a>
-                              )}
-                            </div>
-                            <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginTop: 4 }}>
-                              <button 
-                                className="btn btn-primary btn-sm" 
-                                onClick={() => verifyAch(a.id, true)} 
-                                disabled={isProcessing}
-                                style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-                              >
-                                <Check size={14} /> {procType === 'approving' ? 'Approving...' : 'Approve'}
-                              </button>
-                              <button 
-                                className="btn btn-danger btn-sm" 
-                                onClick={() => verifyAch(a.id, false)} 
-                                disabled={isProcessing}
-                                style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-                              >
-                                <X size={14} /> {procType === 'rejecting' ? 'Rejecting...' : 'Reject'}
-                              </button>
-                            </div>
+                    <div className="form-group">
+                      <label className="form-label" style={{ color: 'var(--color-text-muted)', fontWeight: 700 }}>Announcement Type *</label>
+                      <select
+                        className="form-select"
+                        value={notifyForm.type}
+                        onChange={e => setNotifyForm(prev => ({ ...prev, type: e.target.value }))}
+                        style={{ background: 'var(--bg-input)', borderColor: 'var(--border)', color: 'var(--color-text)' }}
+                      >
+                        <option value="General">General</option>
+                        <option value="Hackathon">Hackathon</option>
+                        <option value="Internship">Internship</option>
+                        <option value="Achievement">Achievement</option>
+                        <option value="Course">Course</option>
+                        <option value="Placement">Placement</option>
+                        <option value="Event">Event</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label className="form-label" style={{ color: 'var(--color-text-muted)', fontWeight: 700 }}>Target Audience</label>
+                      <select
+                        className="form-select"
+                        value={notifyForm.target}
+                        onChange={e => setNotifyForm(prev => ({ ...prev, target: e.target.value }))}
+                        style={{ background: 'var(--bg-input)', borderColor: 'var(--border)', color: 'var(--color-text)' }}
+                      >
+                        <option value="all">All Students & Faculty</option>
+                        <option value="students">Students Only</option>
+                        <option value="faculty">Faculty Only</option>
+                        <option value="cse-a">CSE-A Only</option>
+                        <option value="cse-b">CSE-B Only</option>
+                        <option value="cse-c">CSE-C Only</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label" style={{ color: 'var(--color-text-muted)', fontWeight: 700 }}>Action Link / URL (Optional)</label>
+                      <input
+                        type="url"
+                        className="form-input"
+                        placeholder="https://..."
+                        value={notifyForm.link}
+                        onChange={e => setNotifyForm(prev => ({ ...prev, link: e.target.value }))}
+                        style={{ background: 'var(--bg-input)', borderColor: 'var(--border)', color: 'var(--color-text)' }}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label className="form-label" style={{ color: 'var(--color-text-muted)', fontWeight: 700 }}>Expiry Date (Optional)</label>
+                      <input
+                        type="date"
+                        className="form-input"
+                        value={notifyForm.expires_at}
+                        onChange={e => setNotifyForm(prev => ({ ...prev, expires_at: e.target.value }))}
+                        style={{ background: 'var(--bg-input)', borderColor: 'var(--border)', color: 'var(--color-text)' }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label" style={{ color: 'var(--color-text-muted)', fontWeight: 700 }}>Announcement Message *</label>
+                    <textarea
+                      className="form-input"
+                      rows={5}
+                      placeholder="Write the full announcement details, guidelines, or instructions here..."
+                      value={notifyForm.message}
+                      onChange={e => setNotifyForm(prev => ({ ...prev, message: e.target.value }))}
+                      style={{ background: 'var(--bg-input)', borderColor: 'var(--border)', color: 'var(--color-text)', resize: 'vertical' }}
+                      required
+                    />
+                  </div>
+
+                  {/* ── Photo / Image Attachment Area ── */}
+                  <div className="form-group">
+                    <label className="form-label" style={{ color: 'var(--color-text-muted)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <ImageIcon size={16} color="var(--color-green)" /> Attach Photo / Poster (Optional)
+                    </label>
+
+                    {!annImagePreview ? (
+                      <div
+                        style={{
+                          border: '2px dashed var(--border-strong)',
+                          borderRadius: 12,
+                          padding: '20px',
+                          textAlign: 'center',
+                          background: 'var(--bg-input)',
+                          cursor: 'pointer',
+                          transition: 'all 200ms ease'
+                        }}
+                        onClick={() => document.getElementById('ann-photo-input')?.click()}
+                      >
+                        <input
+                          id="ann-photo-input"
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={handleAnnImageChange}
+                          style={{ display: 'none' }}
+                        />
+                        <Upload size={24} style={{ color: 'var(--color-green)', marginBottom: 8 }} />
+                        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text)' }}>Click to upload poster or image</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-faint)', marginTop: 4 }}>JPEG, PNG, or WEBP (Max size: 5 MB)</div>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 14, background: 'var(--bg-input)', border: '1px solid var(--border)', padding: 12, borderRadius: 12 }}>
+                        <img
+                          src={annImagePreview}
+                          alt="Announcement Preview"
+                          style={{ width: 80, height: 60, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--border-strong)' }}
+                        />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {annImageFile?.name || 'Attached Image'}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--color-text-faint)', marginTop: 2 }}>
+                            {annImageFile ? `${(annImageFile.size / (1024 * 1024)).toFixed(2)} MB` : 'Ready to post'}
                           </div>
                         </div>
-                      );
-                    })}
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={handleRemoveAnnImage}
+                          style={{ color: '#ef4444', display: 'flex', alignItems: 'center', gap: 4 }}
+                          title="Remove Photo"
+                        >
+                          <X size={16} /> Remove
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginTop: 20 }}>
+                    <label className="checkbox-group" style={{ cursor: 'pointer', margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        className="checkbox-custom"
+                        checked={notifyForm.is_important}
+                        onChange={e => setNotifyForm(prev => ({ ...prev, is_important: e.target.checked }))}
+                      />
+                      <span style={{ fontWeight: 700, color: notifyForm.is_important ? '#ef4444' : 'var(--color-text)' }}>
+                        Mark as IMPORTANT (Red Highlighted Banner)
+                      </span>
+                    </label>
+
+                    <button
+                      type="submit"
+                      disabled={notifyLoading || uploadingAnnImage}
+                      className="btn btn-primary"
+                      style={{ padding: '12px 24px', display: 'flex', alignItems: 'center', gap: 8, pointerEvents: 'auto', cursor: 'pointer' }}
+                    >
+                      <Send size={16} /> {uploadingAnnImage ? 'Uploading Image...' : notifyLoading ? 'Broadcasting...' : 'Post & Broadcast Notification'}
+                    </button>
+                  </div>
+                </form>
+
+                {sentNotifications.length > 0 && (
+                  <div style={{ marginTop: 36, borderTop: '1px solid var(--border)', paddingTop: 24 }}>
+                    <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-text)', marginBottom: 16 }}>Posted Announcements ({sentNotifications.length})</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      {sentNotifications.map(n => (
+                        <div
+                          key={n.id}
+                          style={{
+                            background: n.is_important ? 'rgba(239, 68, 68, 0.08)' : 'var(--bg-input)',
+                            border: `1px solid ${n.is_important ? 'rgba(239, 68, 68, 0.4)' : 'var(--border)'}`,
+                            borderRadius: 12,
+                            padding: 16
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 6 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                                <span className="badge badge-green" style={{ fontSize: 11 }}>{n.type || 'General'}</span>
+                                {n.is_important && <span className="badge" style={{ fontSize: 11, background: '#ef4444', color: '#fff' }}>IMPORTANT</span>}
+                                {n.image_url && <span className="badge badge-violet" style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 3 }}><ImageIcon size={10} /> Photo Attached</span>}
+                                <span style={{ fontSize: 11, color: 'var(--color-text-faint)' }}>Audience: {n.target}</span>
+                              </div>
+                              <h4 style={{ fontWeight: 800, color: 'var(--color-text)', margin: 0, fontSize: 15 }}>{n.title}</h4>
+                            </div>
+
+                            <SplitActions
+                              primaryLabel="Manage"
+                              primaryIcon={Settings}
+                              onPrimaryClick={() => setDeleteAnnTarget(n)}
+                              dropdownActions={[
+                                { label: 'Delete Announcement', icon: Trash2, onClick: () => setDeleteAnnTarget(n), destructive: true }
+                              ]}
+                              ariaLabel="More announcement actions"
+                            />
+                          </div>
+
+                          {n.image_url && (
+                            <div style={{ marginTop: 10, marginBottom: 8 }}>
+                              <img
+                                src={n.image_url}
+                                alt={n.title}
+                                style={{ width: '100%', maxHeight: 220, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--border)' }}
+                              />
+                            </div>
+                          )}
+
+                          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '6px 0 0', whiteSpace: 'pre-line' }}>{n.message}</p>
+                          <div style={{ fontSize: 11, color: 'var(--color-text-faint)', marginTop: 8 }}>
+                            Posted: {new Date(n.created_at || n.timestamp || Date.now()).toLocaleString()}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -1485,84 +1346,31 @@ export default function Admin() {
         />
       )}
 
-      {/* ── Custom Rejection Modal ── */}
-      {rejectingAch && (
-        <div className="modal-overlay animate-fadeIn" onClick={e => { if (e.target === e.currentTarget) setRejectingAch(null); }}>
-          <div className="modal card animate-scaleIn" style={{ maxWidth: 480, width: '100%', padding: 28, borderRadius: 'var(--radius-lg)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#FEF2F2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <XCircle size={22} color="#DC2626" />
-                </div>
-                <div>
-                  <h3 style={{ fontSize: 17, fontWeight: 800, color: 'var(--color-text)', margin: 0 }}>Reject Achievement Claim</h3>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    SIET Inceptron Hub
-                  </span>
-                </div>
-              </div>
-              <button className="btn btn-ghost btn-sm" onClick={() => setRejectingAch(null)} style={{ padding: 4, borderRadius: '50%' }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginBottom: 14, lineHeight: 1.5 }}>
-              Rejecting <strong>"{rejectingAch.title}"</strong> submitted by <strong>{rejectingAch.student_name}</strong>.
-            </p>
-
-            {/* Quick Presets */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
-              {[
-                'Verification document incomplete or unreadable',
-                'Duplicate submission',
-                'Incorrect achievement type or details'
-              ].map((preset, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => setRejectionReasonInput(preset)}
-                  style={{ fontSize: 12, background: 'var(--bg-hover)', border: '1px solid var(--border)', padding: '4px 10px', borderRadius: 16 }}
-                >
-                  + {preset}
-                </button>
-              ))}
-            </div>
-
-            <div style={{ marginBottom: 20 }}>
-              <label className="form-label" style={{ fontSize: 12, fontWeight: 700, marginBottom: 6, display: 'block' }}>
-                Reason for Rejection *
-              </label>
-              <textarea
-                className="form-input"
-                rows={3}
-                placeholder="Type specific reason for student feedback..."
-                value={rejectionReasonInput}
-                onChange={e => setRejectionReasonInput(e.target.value)}
-                autoFocus
-              />
-            </div>
-
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button className="btn btn-secondary btn-sm" onClick={() => setRejectingAch(null)}>Cancel</button>
-              <button className="btn btn-danger btn-sm" onClick={handleConfirmReject} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 20px', fontWeight: 700 }}>
-                <XCircle size={15} /> Confirm Rejection
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* ── Confirm Faculty Delete Modal ── */}
+      {deleteFacultyTarget && (
+        <ConfirmModal
+          isOpen={Boolean(deleteFacultyTarget)}
+          title="Delete Faculty Member?"
+          message="This will permanently remove this faculty account."
+          confirmText="Delete Faculty"
+          confirmVariant="danger"
+          onConfirm={handleDeleteFacultyConfirm}
+          onCancel={() => setDeleteFacultyTarget(null)}
+        />
       )}
 
-      {/* ── Confirm Delete Announcement Modal ── */}
-      <ConfirmModal
-        isOpen={Boolean(annToDelete)}
-        onClose={() => setAnnToDelete(null)}
-        onConfirm={confirmDeleteAnn}
-        title="Delete Announcement?"
-        message="Are you sure you want to delete this announcement? It will be permanently removed from the Student Portal."
-        confirmText="Delete Announcement"
-        type="danger"
-      />
+      {/* ── Confirm Announcement Delete Modal ── */}
+      {deleteAnnTarget && (
+        <ConfirmModal
+          isOpen={Boolean(deleteAnnTarget)}
+          title="Delete Announcement?"
+          message={`Are you sure you want to delete "${deleteAnnTarget.title}"? This cannot be undone.`}
+          confirmText="Delete Announcement"
+          confirmVariant="danger"
+          onConfirm={handleDeleteAnnouncementConfirm}
+          onCancel={() => setDeleteAnnTarget(null)}
+        />
+      )}
 
       {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
 

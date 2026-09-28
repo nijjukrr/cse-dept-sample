@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase, getUserWithScore } = require('../db/supabase');
-const { authMiddleware } = require('../middleware/auth');
+const { authMiddleware, optionalAuthMiddleware } = require('../middleware/auth');
 const cache = require('../services/cache');
 const { withHttpCache } = require('../services/httpCache');
 
@@ -36,7 +36,7 @@ router.get('/', withHttpCache('users:list', 300), async (req, res) => {
     profilesQuery,
     supabase
       .from('achievements')
-      .select('user_id, points, description')
+      .select('user_id, points')
       .eq('verified', true)
   ]);
 
@@ -52,9 +52,6 @@ router.get('/', withHttpCache('users:list', 300), async (req, res) => {
   // Group achievements by user_id for O(1) lookup
   const achMap = {};
   for (const a of achs) {
-    if (a.description && a.description.trim().toUpperCase().includes('[REJECTED:')) {
-      continue;
-    }
     if (!achMap[a.user_id]) achMap[a.user_id] = { score: 0, count: 0 };
     achMap[a.user_id].score += a.points || 0;
     achMap[a.user_id].count++;
@@ -90,12 +87,39 @@ router.get('/', withHttpCache('users:list', 300), async (req, res) => {
 });
 
 // ─── GET /api/users/:id ───────────────────────────────────────────────────────
-router.get('/:id', async (req, res) => {
+router.get('/:id', optionalAuthMiddleware, async (req, res) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
   const user = await getUserWithScore(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const targetId = req.params.id;
+  const requester = req.user;
+
+  const isOwner = requester && requester.id === targetId;
+  let isAuthorizedStaff = false;
+
+  if (requester && (requester.role === 'admin' || requester.role === 'faculty')) {
+    if (requester.role === 'admin' || requester.is_hod) {
+      isAuthorizedStaff = true;
+    } else if (requester.advising_class && requester.advising_batch) {
+      if (user.class === requester.advising_class && user.batch === requester.advising_batch) {
+        isAuthorizedStaff = true;
+      }
+    }
+  }
+
+  if (!isOwner && !isAuthorizedStaff) {
+    if (!user.phone_public) {
+      user.phone = null;
+    }
+    if (!user.dob_public) {
+      user.date_of_birth = null;
+    }
+    user.email = null;
+  }
+
   res.json(user);
 });
 
@@ -111,22 +135,23 @@ router.put('/:id', authMiddleware, async (req, res) => {
     avatar_url, phone, phone_public, dob_public 
   } = req.body;
   
-  // Determine which profile table to update
-  const table = req.user.role === 'student' ? 'students' : 'faculty';
+  const isStudent = req.user.role === 'student';
+  const table = isStudent ? 'students' : 'faculty';
   const updates = {};
+
   if (name !== undefined) updates.name = name;
-  if (bio !== undefined) updates.bio = bio;
-  if (github !== undefined) updates.github = github;
-  if (linkedin !== undefined) updates.linkedin = linkedin;
-  if (instagram !== undefined) updates.instagram = instagram;
-  if (twitter !== undefined) updates.twitter = twitter;
-  if (portfolio !== undefined) updates.portfolio = portfolio;
   if (avatar_url !== undefined) updates.avatar_url = avatar_url;
   
-  if (req.user.role === 'student') {
+  if (isStudent) {
+    if (bio !== undefined) updates.bio = typeof bio === 'string' ? bio.slice(0, 160) : bio;
+    if (github !== undefined) updates.github = github;
+    if (linkedin !== undefined) updates.linkedin = linkedin;
+    if (instagram !== undefined) updates.instagram = instagram;
+    if (twitter !== undefined) updates.twitter = twitter;
+    if (portfolio !== undefined) updates.portfolio = portfolio;
     if (phone !== undefined) updates.phone = phone;
-    if (phone_public !== undefined) updates.phone_public = phone_public;
-    if (dob_public !== undefined) updates.dob_public = dob_public;
+    if (phone_public !== undefined) updates.phone_public = Boolean(phone_public);
+    if (dob_public !== undefined) updates.dob_public = Boolean(dob_public);
   }
   
   updates.updated_at = new Date().toISOString();
@@ -196,6 +221,7 @@ router.post('/:id/change-password', authMiddleware, async (req, res) => {
 
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Both passwords required' });
+  if (newPassword.length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
 
   const { data: user, error: fetchErr } = await supabase
     .from('users')
@@ -209,7 +235,10 @@ router.post('/:id/change-password', authMiddleware, async (req, res) => {
   if (!isValid) return res.status(401).json({ error: 'Current password is incorrect' });
 
   const newHash = await require('bcryptjs').hash(newPassword, 10);
-  const { error: patchErr } = await supabase.from('users').update({ password_hash: newHash }).eq('id', uid);
+  const { error: patchErr } = await supabase
+    .from('users')
+    .update({ password_hash: newHash, must_change_password: false })
+    .eq('id', uid);
 
   if (patchErr) return res.status(500).json({ error: 'Failed to update password' });
   res.json({ message: 'Password updated successfully' });

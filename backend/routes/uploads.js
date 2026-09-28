@@ -1,335 +1,207 @@
 const express = require('express');
 const router = express.Router();
-const multer = require('multer');
-const path = require('path');
 const crypto = require('crypto');
-const { authMiddleware: requireAuth, adminMiddleware: requireAdmin } = require('../middleware/auth');
+const multer = require('multer');
+const { authMiddleware, adminMiddleware } = require('../middleware/auth');
+const { uploadUserLimiter } = require('../middleware/rateLimiter');
 const { supabase } = require('../db/supabase');
 
-// Configure Multer in-memory storage (5 MB max)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }
+  limits: { fileSize: 5 * 1024 * 1024 } // 5 MB max limit
 });
 
-// Allowed MIME types
-const ACHIEVEMENT_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
-const ANNOUNCEMENT_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
-
-/**
- * Validate actual file signature (magic bytes) from raw buffer.
- */
-function detectFileType(buffer) {
+// Magic-byte signature & MIME validator
+function getSafeExtension(buffer, mimeType) {
   if (!buffer || buffer.length < 4) return null;
+  const hex = buffer.slice(0, 4).toString('hex').toUpperCase();
 
-  // JPEG: 0xFF 0xD8 0xFF
-  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
-    return 'image/jpeg';
+  if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') {
+    if (hex.startsWith('FFD8FF')) return '.jpg';
   }
-
-  // PNG: 0x89 0x50 0x4E 0x47
-  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
-    return 'image/png';
+  if (mimeType === 'image/png') {
+    if (hex.startsWith('89504E47')) return '.png';
   }
-
-  // WEBP: RIFF at 0..3 and WEBP at 8..11
-  if (
-    buffer.length >= 12 &&
-    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
-    buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
-  ) {
-    return 'image/webp';
+  if (mimeType === 'image/webp') {
+    if (buffer.slice(0, 4).toString('utf8') === 'RIFF' && buffer.slice(8, 12).toString('utf8') === 'WEBP') return '.webp';
   }
-
-  // PDF: %PDF- (0x25 0x50 0x44 0x46 0x2D)
-  if (
-    buffer.length >= 5 &&
-    buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46 && buffer[4] === 0x2D
-  ) {
-    return 'application/pdf';
+  if (mimeType === 'application/pdf') {
+    if (hex.startsWith('25504446')) return '.pdf';
   }
-
   return null;
 }
 
-/**
- * Generate safe storage path in format: <userId>/<timestamp>-<uuid>.<ext>
- */
-function generateSecureStoragePath(userId, originalName, detectedMime) {
-  const mimeToExt = {
-    'image/jpeg': 'jpg',
-    'image/png': 'png',
-    'image/webp': 'webp',
-    'application/pdf': 'pdf'
-  };
-  const safeExt = mimeToExt[detectedMime] || 'bin';
-  const safeUserId = String(userId || 'anonymous').replace(/[^a-zA-Z0-9-]/g, '');
-  const timestamp = Date.now();
-  const uuid = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 10);
-  
-  return `${safeUserId}/${timestamp}-${uuid}.${safeExt}`;
+function validateMagicBytes(buffer, mimeType) {
+  return getSafeExtension(buffer, mimeType) !== null;
 }
 
 /**
- * Resolves a stored proof_url value.
- * If proofUrl starts with "storage://achievement-proofs/", generates a 1-hour signed URL.
- * If proofUrl is a normal external URL (http/https), returns it unchanged.
+ * Resolves a storage reference (e.g. storage://achievement-proofs/path/to/file)
+ * to a short-lived signed URL (for private proofs) or public URL (for public posts).
  */
-async function resolveProofUrl(proofUrl) {
-  if (!proofUrl || typeof proofUrl !== 'string') return proofUrl;
+async function resolveStorageUrl(storageRef) {
+  if (!storageRef || typeof storageRef !== 'string') return storageRef;
 
-  const prefix = 'storage://achievement-proofs/';
-  if (proofUrl.startsWith(prefix)) {
-    const objectPath = proofUrl.slice(prefix.length);
-    try {
-      const { data, error } = await supabase.storage
-        .from('achievement-proofs')
-        .createSignedUrl(objectPath, 3600); // 1 hour expiry (3600s)
+  if (storageRef.startsWith('storage://')) {
+    const uri = storageRef.replace('storage://', '');
+    const parts = uri.split('/');
+    const bucket = parts[0];
+    const filePath = parts.slice(1).join('/');
 
-      if (data?.signedUrl) {
-        return data.signedUrl;
-      }
-    } catch (err) {
-      console.warn('Failed to resolve signed URL for proof:', err);
-    }
-  }
-
-  return proofUrl;
-}
-
-/**
- * Formats a single achievement or array of achievements with fresh on-demand 1-hour signed URLs.
- */
-async function formatAchievementWithSignedUrl(achievement) {
-  if (!achievement) return achievement;
-  if (Array.isArray(achievement)) {
-    return Promise.all(achievement.map(a => formatAchievementWithSignedUrl(a)));
-  }
-
-  if (achievement.proof_url) {
-    const resolvedUrl = await resolveProofUrl(achievement.proof_url);
-    return {
-      ...achievement,
-      proof_url: resolvedUrl
-    };
-  }
-
-  return achievement;
-}
-
-/**
- * Extract storage object path from a storage_ref or URL.
- */
-function extractObjectPath(bucketName, rawInput) {
-  if (!rawInput || typeof rawInput !== 'string') return null;
-
-  const storagePrefix = `storage://${bucketName}/`;
-  if (rawInput.startsWith(storagePrefix)) {
-    return rawInput.slice(storagePrefix.length);
-  }
-
-  if (rawInput.includes(`/${bucketName}/`)) {
-    const parts = rawInput.split(`/${bucketName}/`)[1];
-    if (parts) {
-      return parts.split('?')[0]; // Strip query tokens
-    }
-  }
-
-  return rawInput;
-}
-
-/**
- * Helper to delete storage object from bucket safely.
- */
-async function deleteUploadedFileFromUrl(bucketName, fileUrlOrPath) {
-  if (!fileUrlOrPath) return;
-  try {
-    const objectPath = extractObjectPath(bucketName, fileUrlOrPath);
-    if (objectPath) {
-      await supabase.storage.from(bucketName).remove([objectPath]);
-    }
-  } catch (err) {
-    console.warn(`Failed to cleanup storage object [${bucketName} - ${fileUrlOrPath}]:`, err);
-  }
-}
-
-// Multer error handling wrapper middleware
-function parseSingleFile(fieldName) {
-  return (req, res, next) => {
-    const middleware = upload.single(fieldName);
-    middleware(req, res, (err) => {
-      if (err) {
-        if (err.code === 'LIMIT_FILE_SIZE') {
-          return res.status(400).json({ error: 'File size exceeds maximum limit of 5MB.' });
-        }
-        return res.status(400).json({ error: err.message || 'File upload error' });
-      }
-      next();
-    });
-  };
-}
-
-// ─── POST /api/uploads/achievement-proof ─────────────────────────────────────
-router.post('/achievement-proof', requireAuth, parseSingleFile('file'), async (req, res) => {
-  try {
-    const file = req.file;
-    if (!file) {
-      return res.status(400).json({ error: 'No file selected.' });
-    }
-
-    if (file.size > 5 * 1024 * 1024) {
-      return res.status(400).json({ error: 'File size exceeds maximum limit of 5MB.' });
-    }
-
-    const detectedMime = detectFileType(file.buffer);
-    if (!detectedMime || !ACHIEVEMENT_MIMES.includes(detectedMime)) {
-      return res.status(400).json({ error: 'Invalid file type. Supported formats: JPG, PNG, WEBP, PDF.' });
-    }
-
-    const headerMime = (file.mimetype || '').toLowerCase();
-    if (headerMime && headerMime !== 'application/octet-stream' && headerMime !== detectedMime) {
-      const isJpegAlias = (headerMime.includes('jpg') || headerMime.includes('jpeg')) && (detectedMime === 'image/jpeg');
-      if (!isJpegAlias) {
-        return res.status(400).json({ error: 'File extension/type mismatch. File header does not match actual contents.' });
-      }
-    }
-
-    const storagePath = generateSecureStoragePath(req.user.id, file.originalname, detectedMime);
-    
-    // Upload to private bucket achievement-proofs
-    const { data: uploadData, error: uploadErr } = await supabase.storage
-      .from('achievement-proofs')
-      .upload(storagePath, file.buffer, {
-        contentType: detectedMime,
-        upsert: true
-      });
-
-    if (uploadErr || !uploadData) {
-      console.warn('Supabase Storage achievement-proof upload error:', uploadErr);
-      return res.status(400).json({ error: 'File upload is not configured yet. You can paste a public URL instead.', storage_available: false });
-    }
-
-    const storageRef = `storage://achievement-proofs/${storagePath}`;
-
-    // Create 1-hour preview URL for immediate frontend display
-    const { data: signedData } = await supabase.storage
-      .from('achievement-proofs')
-      .createSignedUrl(storagePath, 3600);
-
-    return res.json({
-      url: storageRef,
-      storage_ref: storageRef,
-      preview_url: signedData?.signedUrl || storageRef,
-      storage_available: true
-    });
-  } catch (err) {
-    console.error('Achievement proof upload failure:', err);
-    return res.status(500).json({ error: 'Failed to process file upload.' });
-  }
-});
-
-// ─── POST /api/uploads/announcement-image ──────────────────────────────────
-router.post('/announcement-image', requireAuth, requireAdmin, parseSingleFile('file'), async (req, res) => {
-  try {
-    const file = req.file;
-    if (!file) {
-      return res.status(400).json({ error: 'No file selected.' });
-    }
-
-    if (file.size > 5 * 1024 * 1024) {
-      return res.status(400).json({ error: 'File size exceeds maximum limit of 5MB.' });
-    }
-
-    const detectedMime = detectFileType(file.buffer);
-    if (!detectedMime || !ANNOUNCEMENT_MIMES.includes(detectedMime)) {
-      return res.status(400).json({ error: 'Invalid file type. Supported image formats: JPG, PNG, WEBP.' });
-    }
-
-    const headerMime = (file.mimetype || '').toLowerCase();
-    if (headerMime && headerMime !== 'application/octet-stream' && headerMime !== detectedMime) {
-      const isJpegAlias = (headerMime.includes('jpg') || headerMime.includes('jpeg')) && (detectedMime === 'image/jpeg');
-      if (!isJpegAlias) {
-        return res.status(400).json({ error: 'File extension/type mismatch. File header does not match actual contents.' });
-      }
-    }
-
-    const storagePath = generateSecureStoragePath(req.user.id, file.originalname, detectedMime);
-
-    // Upload to public bucket department-posts
-    const { data: uploadData, error: uploadErr } = await supabase.storage
-      .from('department-posts')
-      .upload(storagePath, file.buffer, {
-        contentType: detectedMime,
-        upsert: true
-      });
-
-    if (uploadErr || !uploadData) {
-      console.warn('Supabase Storage department-posts upload error:', uploadErr);
-      return res.status(400).json({ error: 'File upload is not configured yet. You can paste a public URL instead.', storage_available: false });
-    }
-
-    const { data: publicUrlData } = supabase.storage
-      .from('department-posts')
-      .getPublicUrl(storagePath);
-
-    return res.json({
-      url: publicUrlData?.publicUrl || storagePath,
-      storagePath,
-      storage_available: true
-    });
-  } catch (err) {
-    console.error('Announcement image upload failure:', err);
-    return res.status(500).json({ error: 'Failed to process image upload.' });
-  }
-});
-
-// ─── POST /api/uploads/cleanup ──────────────────────────────────────────────
-router.post('/cleanup', requireAuth, async (req, res) => {
-  try {
-    const { bucket, url, storage_ref } = req.body;
-    const inputRef = storage_ref || url;
-
-    if (!bucket || !inputRef) {
-      return res.status(400).json({ error: 'Bucket and file reference are required.' });
-    }
-
-    if (!['achievement-proofs', 'department-posts'].includes(bucket)) {
-      return res.status(400).json({ error: 'Invalid storage bucket specified.' });
-    }
-
-    const objectPath = extractObjectPath(bucket, inputRef);
-    if (!objectPath) {
-      return res.status(400).json({ error: 'Invalid object reference.' });
-    }
-
-    // Path traversal protection (prevent ../ or ..\ or leading slashes)
-    if (objectPath.includes('..') || objectPath.includes('\\') || objectPath.startsWith('/')) {
-      return res.status(400).json({ error: 'Invalid object path syntax.' });
-    }
-
-    // Authorization checks
     if (bucket === 'achievement-proofs') {
-      if (req.user.role === 'student') {
-        const expectedPrefix = `${req.user.id}/`;
-        if (!objectPath.startsWith(expectedPrefix)) {
-          return res.status(403).json({ error: 'Forbidden: You can only cleanup your own storage files.' });
-        }
-      }
+      const { data, error } = await supabase.storage.from(bucket).createSignedUrl(filePath, 3600);
+      if (error || !data?.signedUrl) return null;
+      return data.signedUrl;
     } else if (bucket === 'department-posts') {
-      if (req.user.role === 'student') {
-        return res.status(403).json({ error: 'Forbidden: Students cannot cleanup department post storage.' });
+      const { data } = supabase.storage.from(bucket).getPublicUrl(filePath);
+      return data?.publicUrl || null;
+    }
+  }
+
+  return storageRef;
+}
+
+/**
+ * Deletes a storage object given a storage reference string.
+ */
+async function deleteStorageObject(storageRef) {
+  if (!storageRef || !storageRef.startsWith('storage://')) return false;
+
+  try {
+    const uri = storageRef.replace('storage://', '');
+    const parts = uri.split('/');
+    const bucket = parts[0];
+    const filePath = parts.slice(1).join('/');
+
+    const { error } = await supabase.storage.from(bucket).remove([filePath]);
+    if (error) console.warn('Storage object cleanup warning:', error.message);
+    return !error;
+  } catch (err) {
+    console.warn('Storage cleanup catch error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * POST /api/uploads/proof
+ * Upload private achievement proof document (JPEG, PNG, WEBP, PDF, max 5MB).
+ */
+router.post('/proof', authMiddleware, uploadUserLimiter, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File size exceeds maximum limit of 5 MB' });
       }
+      return res.status(400).json({ error: err.message || 'File upload failed' });
+    }
+    next();
+  });
+}, async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    await supabase.storage.from(bucket).remove([objectPath]);
-    return res.json({ success: true });
+    const { buffer, mimetype } = req.file;
+    if (buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'File size exceeds maximum limit of 5 MB' });
+    }
+
+    const ext = getSafeExtension(buffer, mimetype);
+    if (!ext) {
+      return res.status(400).json({ error: 'Invalid file format or spoofed mime type. Allowed formats: JPEG, PNG, WEBP, PDF.' });
+    }
+
+    const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(8).toString('hex');
+    const safeFilename = `${req.user.id}/${Date.now()}-${uuid}${ext}`;
+
+    const { data, error } = await supabase.storage
+      .from('achievement-proofs')
+      .upload(safeFilename, buffer, {
+        contentType: mimetype,
+        upsert: false
+      });
+
+    if (error) {
+      console.error('Supabase storage upload error:', error);
+      return res.status(500).json({ error: 'Failed to store proof file' });
+    }
+
+    const storageRef = `storage://achievement-proofs/${safeFilename}`;
+    const signedUrl = await resolveStorageUrl(storageRef);
+
+    res.json({
+      success: true,
+      storage_ref: storageRef,
+      preview_url: signedUrl
+    });
   } catch (err) {
-    console.error('Storage cleanup failure:', err);
-    return res.status(500).json({ error: 'Cleanup failed.' });
+    console.error('Upload proof catch error:', err);
+    next(err);
   }
 });
 
-module.exports = router;
-module.exports.resolveProofUrl = resolveProofUrl;
-module.exports.formatAchievementWithSignedUrl = formatAchievementWithSignedUrl;
-module.exports.deleteUploadedFileFromUrl = deleteUploadedFileFromUrl;
+/**
+ * POST /api/uploads/announcement
+ * Upload public announcement/post image (JPEG, PNG, WEBP, max 5MB).
+ * Restricted to Admin / Faculty roles.
+ */
+router.post('/announcement', authMiddleware, adminMiddleware, uploadUserLimiter, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File size exceeds maximum limit of 5 MB' });
+      }
+      return res.status(400).json({ error: err.message || 'File upload failed' });
+    }
+    next();
+  });
+}, async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { buffer, mimetype } = req.file;
+    if (buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'File size exceeds maximum limit of 5 MB' });
+    }
+
+    const ext = getSafeExtension(buffer, mimetype);
+    if (!ext || mimetype === 'application/pdf') {
+      return res.status(400).json({ error: 'Invalid image format. Allowed formats: JPEG, PNG, WEBP.' });
+    }
+
+    const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(8).toString('hex');
+    const safeFilename = `${Date.now()}-${uuid}${ext}`;
+
+    const { data, error } = await supabase.storage
+      .from('department-posts')
+      .upload(safeFilename, buffer, {
+        contentType: mimetype,
+        upsert: false
+      });
+
+    if (error) {
+      return res.status(500).json({ error: 'Failed to upload announcement image' });
+    }
+
+    const storageRef = `storage://department-posts/${safeFilename}`;
+    const publicUrl = await resolveStorageUrl(storageRef);
+
+    res.json({
+      success: true,
+      storage_ref: storageRef,
+      url: publicUrl
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = {
+  router,
+  resolveStorageUrl,
+  deleteStorageObject,
+  validateMagicBytes
+};

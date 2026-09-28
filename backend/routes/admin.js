@@ -1,19 +1,39 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { supabase, getAdminScope } = require('../db/supabase');
-const { authMiddleware, adminMiddleware, hodMiddleware, facultyAdvisorMiddleware } = require('../middleware/auth');
+const { authMiddleware, adminMiddleware, strictAdminMiddleware, hodMiddleware, facultyAdvisorMiddleware } = require('../middleware/auth');
 const cache = require('../services/cache');
+const { getSectionFromRegisterNo } = require('../services/sectionService');
+
+const { getLeaderboardStats, isApprovedAchievement, fetchVerifiedAchievements } = require('../services/scoringService');
 
 router.use(authMiddleware, adminMiddleware);
 
-const DEFAULT_PASSWORD = 'password123';
+function generateTemporaryPassword() {
+  return crypto.randomBytes(6).toString('hex'); // 12 random hex characters
+}
+
+// ─── GET /api/admin/overview-stats ───────────────────────────────────────────
+router.get('/overview-stats', async (req, res) => {
+  try {
+    const stats = await getLeaderboardStats();
+    res.json(stats);
+  } catch (err) {
+    console.error('Overview stats error:', err);
+    res.status(500).json({ error: 'Failed to fetch overview stats' });
+  }
+});
 
 // ─── GET /api/admin/students ──────────────────────────────────────────────────
 router.get('/students', async (req, res) => {
   const { search, class: cls, batch } = req.query;
   const scope = await getAdminScope(req.user.id, req.user.role);
-  const cacheKey = `admin:students:${req.user.id}:${cls || ''}:${batch || ''}:${search || ''}`;
+  
+  // Cache key includes req.user.id and specific access scope to guarantee isolation between advisors
+  const scopeToken = scope.hasFullAccess ? 'full' : `${scope.advisingClass || ''}_${scope.advisingBatch || ''}`;
+  const cacheKey = `admin:students:${req.user.id}:${scopeToken}:${cls || ''}:${batch || ''}:${search || ''}`;
 
   let cached = await cache.get(cacheKey);
   if (cached) return res.json(cached);
@@ -33,26 +53,34 @@ router.get('/students', async (req, res) => {
 
   if (search) query = query.ilike('name', `%${search}%`);
 
-  const { data: profiles, error: pErr } = await query;
-  if (pErr) return res.status(500).json({ error: 'Failed to fetch students', details: pErr.message });
-  
-  if (!profiles || !profiles.length) {
+  // Parallel fetch: profiles and all verified achievements
+  const [pRes, aRes] = await Promise.all([
+    query,
+    supabase.from('achievements').select('user_id, points, status, verified, description').or('verified.eq.true,status.eq.approved')
+  ]);
+
+  if (pRes.error) return res.status(500).json({ error: 'Failed to fetch students', details: pRes.error.message });
+  const profiles = pRes.data || [];
+  const rawAchs = aRes.data || [];
+
+  if (!profiles.length) {
     await cache.set(cacheKey, [], 1800);
     return res.json([]);
   }
 
+  const validAchs = rawAchs.filter(isApprovedAchievement);
+
   const userIds = profiles.map(s => s.user_id);
 
-  // Parallel fetch: emails and verified achievements ONLY for the requested student userIds
-  const [uRes, aRes] = await Promise.all([
-    supabase.from('users').select('id, email').in('id', userIds),
-    supabase.from('achievements').select('user_id, points').eq('verified', true).in('user_id', userIds)
+  // Fetch emails and group achievements in parallel
+  const [uRes] = await Promise.all([
+    supabase.from('users').select('id, email').in('id', userIds)
   ]);
 
   const emailMap = Object.fromEntries((uRes.data || []).map(u => [u.id, u.email]));
-  const achs = aRes.data || [];
+
   const achMap = {};
-  for (const a of achs) {
+  for (const a of validAchs) {
     if (!achMap[a.user_id]) achMap[a.user_id] = { score: 0, count: 0 };
     achMap[a.user_id].score += a.points || 0;
     achMap[a.user_id].count++;
@@ -64,7 +92,11 @@ router.get('/students', async (req, res) => {
     ...s,
     score: achMap[s.user_id]?.score || 0,
     achievement_count: achMap[s.user_id]?.count || 0,
-  }));
+  })).sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.achievement_count !== a.achievement_count) return b.achievement_count - a.achievement_count;
+    return (a.name || '').localeCompare(b.name || '');
+  });
 
   await cache.set(cacheKey, result, 1800);
   res.json(result);
@@ -88,14 +120,17 @@ router.post('/students', async (req, res) => {
     }
     studentClass = scope.advisingClass;
     studentBatch = scope.advisingBatch;
+  } else if (!studentClass && (reg_no || roll_no)) {
+    studentClass = getSectionFromRegisterNo(reg_no || roll_no, studentClass);
   }
 
-  const password_hash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
+  const tempPassword = generateTemporaryPassword();
+  const password_hash = await bcrypt.hash(tempPassword, 10);
 
-  // Insert into users
+  // Insert into users with must_change_password = true
   const { data: newUser, error: uErr } = await supabase
     .from('users')
-    .insert({ email: email.trim().toLowerCase(), password_hash, role: 'student' })
+    .insert({ email: email.trim().toLowerCase(), password_hash, role: 'student', must_change_password: true })
     .select('id')
     .single();
 
@@ -111,7 +146,7 @@ router.post('/students', async (req, res) => {
       user_id: newUser.id,
       name: name.trim().toUpperCase(),
       roll_no: roll_no.trim().toUpperCase(),
-      reg_no,
+      reg_no: reg_no ? reg_no.trim() : null,
       class: studentClass,
       batch: studentBatch,
       date_of_birth: date_of_birth || null,
@@ -126,15 +161,12 @@ router.post('/students', async (req, res) => {
   }
 
   // Clear cache for admin students
-  const cacheKeys = await cache.keys();
-  const adminKeys = cacheKeys.filter(key => key.startsWith('admin:students:'));
-  for (const key of adminKeys) {
-    await cache.del(key);
-  }
+  await cache.delPrefix('admin:students:');
   await cache.delPrefix('leaderboard:');
   await cache.delPrefix('users:');
 
-  res.status(201).json({ id: newUser.id, email, ...profile });
+  // Return temporary password ONCE to authorized admin at account creation
+  res.status(201).json({ id: newUser.id, email, temporary_password: tempPassword, ...profile });
 });
 
 // ─── PATCH /api/admin/students/:id ───────────────────────────────────────────
@@ -153,7 +185,11 @@ router.patch('/students/:id', async (req, res) => {
   const profileUpdates = {};
   if (req.body.name !== undefined) profileUpdates.name = req.body.name.trim().toUpperCase();
   if (req.body.roll_no !== undefined) profileUpdates.roll_no = req.body.roll_no.trim().toUpperCase();
-  if (req.body.reg_no !== undefined) profileUpdates.reg_no = req.body.reg_no;
+  if (req.body.reg_no !== undefined) {
+    profileUpdates.reg_no = req.body.reg_no;
+    const computedSection = getSectionFromRegisterNo(req.body.reg_no);
+    if (computedSection) profileUpdates.class = computedSection;
+  }
   
   if (scope.hasFullAccess) {
     if (req.body.class !== undefined) profileUpdates.class = req.body.class;
@@ -176,11 +212,7 @@ router.patch('/students/:id', async (req, res) => {
   }
 
   // Clear cache for admin students
-  const cacheKeys = await cache.keys();
-  const adminKeys = cacheKeys.filter(key => key.startsWith('admin:students:'));
-  for (const key of adminKeys) {
-    await cache.del(key);
-  }
+  await cache.delPrefix('admin:students:');
   await cache.delPrefix('leaderboard:');
   await cache.delPrefix('users:');
 
@@ -204,121 +236,12 @@ router.delete('/students/:id', async (req, res) => {
   if (error) return res.status(500).json({ error: 'Failed to delete student.', details: error.message });
 
   // Clear cache for admin students
-  const cacheKeys = await cache.keys();
-  const adminKeys = cacheKeys.filter(key => key.startsWith('admin:students:'));
-  for (const key of adminKeys) {
-    await cache.del(key);
-  }
+  await cache.delPrefix('admin:students:');
   await cache.delPrefix('leaderboard:');
   await cache.delPrefix('users:');
 
   res.json({ message: 'Student deleted successfully.' });
 });
-
-// ─── GET /api/admin/faculty ───────────────────────────────────────────────────
-router.get('/faculty', async (req, res) => {
-  const cacheKey = 'admin:faculty';
-  let cached = await cache.get(cacheKey);
-  if (cached) return res.json(cached);
-
-  const { data: profiles, error } = await supabase
-    .from('faculty')
-    .select('user_id, name, designation, department, avatar_url, advising_class, advising_batch')
-    .order('name');
-
-  if (error) return res.status(500).json({ error: 'Failed to fetch faculty.' });
-
-  const userIds = profiles.map(f => f.user_id);
-  const { data: authRows } = await supabase.from('users').select('id, email, role').in('id', userIds);
-  const authMap = Object.fromEntries((authRows || []).map(u => [u.id, u]));
-
-  const result = profiles.map(f => ({ id: f.user_id, ...f, email: authMap[f.user_id]?.email || '' }));
-
-  await cache.set(cacheKey, result, 1800);
-  res.json(result);
-});
-
-// ─── POST /api/admin/faculty ──────────────────────────────────────────────────
-router.post('/faculty', async (req, res) => {
-  const scope = await getAdminScope(req.user.id, req.user.role);
-  if (!scope.hasFullAccess) return res.status(403).json({ error: 'Only HOD or Admin can add faculty' });
-
-  const { name, email, designation, department } = req.body;
-  if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
-
-  const password_hash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
-
-  // 1. Create user
-  const { data: newUser, error: uErr } = await supabase
-    .from('users')
-    .insert({ email: email.trim().toLowerCase(), password_hash, role: 'faculty' })
-    .select('id')
-    .single();
-
-  if (uErr) {
-    if (uErr.code === '23505') return res.status(409).json({ error: 'A user with this email already exists.' });
-    return res.status(500).json({ error: 'Failed to create faculty user.', details: uErr.message });
-  }
-
-  // 2. Create profile
-  const { data: profile, error: pErr } = await supabase
-    .from('faculty')
-    .insert({
-      user_id: newUser.id,
-      name: name.trim().toUpperCase(),
-      designation: designation?.trim() || 'Faculty',
-      department: department?.trim() || 'CSE'
-    })
-    .select()
-    .single();
-
-  if (pErr) {
-    await supabase.from('users').delete().eq('id', newUser.id);
-    return res.status(500).json({ error: 'Failed to create faculty profile.', details: pErr.message });
-  }
-
-  // Clear cache for admin faculty
-  await cache.del('admin:faculty');
-
-  res.status(201).json({ id: newUser.id, email, ...profile });
-});
-
-// ─── PATCH /api/admin/faculty/:id ─────────────────────────────────────────────
-router.patch('/faculty/:id', async (req, res) => {
-  const scope = await getAdminScope(req.user.id, req.user.role);
-  if (!scope.hasFullAccess) return res.status(403).json({ error: 'Only HOD or Admin can manage faculty' });
-
-  const { id } = req.params;
-  const { advising_class, advising_batch, designation } = req.body;
-  const updates = {};
-  if (advising_class !== undefined) updates.advising_class = advising_class || null;
-  if (advising_batch !== undefined) updates.advising_batch = advising_batch || null;
-  if (designation !== undefined) updates.designation = designation;
-
-  if (Object.keys(updates).length > 0) {
-    const { error } = await supabase.from('faculty').update(updates).eq('user_id', id);
-    if (error) return res.status(500).json({ error: 'Failed to update faculty advisor mapping', details: error.message });
-  }
-
-  // Clear cache
-  await cache.del('admin:faculty');
-
-  res.json({ success: true });
-});
-
-// ─── POST /api/admin/clear-cache ───────────────────────────────────────────────
-router.post('/clear-cache', async (req, res) => {
-  // Allow only admins to clear cache
-  const scope = await getAdminScope(req.user.id, req.user.role);
-  if (!scope.hasFullAccess) return res.status(403).json({ error: 'Only full admins can clear cache' });
-
-  // Flush cache
-  await cache.flush();
-
-  res.json({ message: 'Cache cleared successfully' });
-});
-
-module.exports = router;
 
 // ─── Faculty Advisor Routes ──────────────────────────────────────────────────
 
@@ -430,8 +353,7 @@ router.get('/advisor/achievements', facultyAdvisorMiddleware, async (req, res) =
     students: profileMap[a.user_id] || null
   }));
 
-  const { formatAchievementWithSignedUrl } = require('./uploads');
-  res.json(await formatAchievementWithSignedUrl(result));
+  res.json(result);
 });
 
 // PATCH /api/admin/advisor/achievements/:id - Approve or reject achievement
@@ -539,70 +461,118 @@ router.patch('/advisor/achievements/:id', facultyAdvisorMiddleware, async (req, 
   res.status(400).json({ error: 'Invalid action. Use "approve" or "reject"' });
 });
 
-// ─── Admin: Faculty Management (HOD only) ────────────────────────────────────
+// ─── Admin: Faculty Management (HOD / Admin only) ────────────────────────────
 
-// GET /api/admin/faculty - List all faculty (HOD only)
+// GET /api/admin/faculty - List all faculty
 router.get('/faculty', hodMiddleware, async (req, res) => {
   const cacheKey = 'admin:faculty';
   let cached = await cache.get(cacheKey);
   if (cached) return res.json(cached);
 
-  const { data: profiles, error } = await supabase
+  let { data: profiles, error } = await supabase
     .from('faculty')
     .select('user_id, name, designation, department, avatar_url, advising_class, advising_batch, is_hod')
     .order('name');
 
-  if (error) return res.status(500).json({ error: 'Failed to fetch faculty.' });
+  if (error && (error.code === '42703' || error.code === 'PGRST204' || error.message?.includes('is_hod'))) {
+    const fallback = await supabase
+      .from('faculty')
+      .select('user_id, name, designation, department, avatar_url, advising_class, advising_batch')
+      .order('name');
+    profiles = fallback.data;
+    error = fallback.error;
+  }
+
+  if (error || !profiles) return res.status(500).json({ error: 'Failed to fetch faculty.', details: error?.message });
 
   const userIds = profiles.map(f => f.user_id);
-  const { data: authRows } = await supabase.from('users').select('id, email, role, is_hod').in('id', userIds);
-  const authMap = Object.fromEntries((authRows || []).map(u => [u.id, u]));
+  let authMap = {};
+  if (userIds.length > 0) {
+    let { data: authRows, error: aErr } = await supabase.from('users').select('id, email, role, is_hod').in('id', userIds);
+    if (aErr && (aErr.code === '42703' || aErr.code === 'PGRST204' || aErr.message?.includes('is_hod'))) {
+      const fallback = await supabase.from('users').select('id, email, role').in('id', userIds);
+      authRows = fallback.data;
+    }
+    authMap = Object.fromEntries((authRows || []).map(u => [u.id, u]));
+  }
 
-  const result = profiles.map(f => ({ 
-    id: f.user_id, 
-    ...f, 
-    email: authMap[f.user_id]?.email || '',
-    role: authMap[f.user_id]?.role || 'faculty',
-    is_hod: authMap[f.user_id]?.is_hod || false
-  }));
+  const result = profiles.map(f => {
+    const userObj = authMap[f.user_id];
+    const isHod = Boolean(
+      f.is_hod ||
+      userObj?.is_hod ||
+      (f.designation && f.designation.toUpperCase() === 'HOD') ||
+      userObj?.role === 'admin'
+    );
+    return {
+      id: f.user_id,
+      ...f,
+      email: userObj?.email || '',
+      role: userObj?.role || 'faculty',
+      is_hod: isHod
+    };
+  });
 
   await cache.set(cacheKey, result, 1800);
   res.json(result);
 });
 
-// POST /api/admin/faculty - Add new faculty (HOD only)
+// POST /api/admin/faculty - Add new faculty (HOD / Admin only)
 router.post('/faculty', hodMiddleware, async (req, res) => {
   const { name, email, designation, department, advising_class, advising_batch, is_hod } = req.body;
   if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
 
-  const password_hash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
+  const tempPassword = generateTemporaryPassword();
+  const password_hash = await bcrypt.hash(tempPassword, 10);
 
   // 1. Create user
-  const { data: newUser, error: uErr } = await supabase
+  let userPayload = { email: email.trim().toLowerCase(), password_hash, role: 'faculty' };
+  let { data: newUser, error: uErr } = await supabase
     .from('users')
-    .insert({ email: email.trim().toLowerCase(), password_hash, role: 'faculty', is_hod: !!is_hod })
+    .insert({ ...userPayload, is_hod: !!is_hod, must_change_password: true })
     .select('id')
     .single();
 
-  if (uErr) {
-    if (uErr.code === '23505') return res.status(409).json({ error: 'A user with this email already exists.' });
-    return res.status(500).json({ error: 'Failed to create user.', details: uErr.message });
+  if (uErr && (uErr.code === '42703' || uErr.code === 'PGRST204' || uErr.message?.includes('is_hod') || uErr.message?.includes('must_change_password'))) {
+    const fallback = await supabase
+      .from('users')
+      .insert(userPayload)
+      .select('id')
+      .single();
+    newUser = fallback.data;
+    uErr = fallback.error;
+  }
+
+  if (uErr || !newUser) {
+    if (uErr?.code === '23505') return res.status(409).json({ error: 'A user with this email already exists.' });
+    return res.status(500).json({ error: 'Failed to create user.', details: uErr?.message });
   }
 
   // 2. Create faculty profile
-  const { data: profile, error: pErr } = await supabase
+  let facultyPayload = {
+    user_id: newUser.id,
+    name: name.trim().toUpperCase(),
+    designation: designation?.trim() || 'Faculty',
+    department: department?.trim() || 'CSE',
+    advising_class: advising_class || null,
+    advising_batch: advising_batch || null
+  };
+
+  let { data: profile, error: pErr } = await supabase
     .from('faculty')
-    .insert({
-      user_id: newUser.id,
-      name: name.trim().toUpperCase(),
-      designation: designation?.trim() || 'Faculty',
-      department: department?.trim() || 'CSE',
-      advising_class: advising_class || null,
-      advising_batch: advising_batch || null,
-      is_hod: !!is_hod
-    })
+    .insert({ ...facultyPayload, is_hod: !!is_hod })
     .select()
     .single();
+
+  if (pErr && (pErr.code === '42703' || pErr.code === 'PGRST204' || pErr.message?.includes('is_hod'))) {
+    const fallback = await supabase
+      .from('faculty')
+      .insert(facultyPayload)
+      .select()
+      .single();
+    profile = fallback.data;
+    pErr = fallback.error;
+  }
 
   if (pErr) {
     await supabase.from('users').delete().eq('id', newUser.id);
@@ -612,10 +582,11 @@ router.post('/faculty', hodMiddleware, async (req, res) => {
   // Clear cache
   await cache.del('admin:faculty');
 
-  res.status(201).json({ id: newUser.id, email, ...profile });
+  // Return temporary password ONCE to authorized admin/HOD at account creation
+  res.status(201).json({ id: newUser.id, email, temporary_password: tempPassword, ...profile });
 });
 
-// PATCH /api/admin/faculty/:id - Update faculty (HOD only)
+// PATCH /api/admin/faculty/:id - Update faculty (HOD / Admin only)
 router.patch('/faculty/:id', hodMiddleware, async (req, res) => {
   const { id } = req.params;
   const { designation, department, advising_class, advising_batch, is_hod } = req.body;
@@ -624,18 +595,22 @@ router.patch('/faculty/:id', hodMiddleware, async (req, res) => {
   if (department !== undefined) updates.department = department;
   if (advising_class !== undefined) updates.advising_class = advising_class || null;
   if (advising_batch !== undefined) updates.advising_batch = advising_batch || null;
-  if (is_hod !== undefined) updates.is_hod = !!is_hod;
 
-  if (Object.keys(updates).length === 0) {
-    return res.status(400).json({ error: 'No valid fields to update' });
+  if (Object.keys(updates).length > 0) {
+    let { error } = await supabase.from('faculty').update(updates).eq('user_id', id);
+    if (error) return res.status(500).json({ error: 'Failed to update faculty.', details: error.message });
   }
-
-  const { error } = await supabase.from('faculty').update(updates).eq('user_id', id);
-  if (error) return res.status(500).json({ error: 'Failed to update faculty.', details: error.message });
 
   // Also update is_hod in users table if provided
   if (is_hod !== undefined) {
-    await supabase.from('users').update({ is_hod: !!is_hod }).eq('id', id);
+    const { error: fErr } = await supabase.from('faculty').update({ is_hod: !!is_hod }).eq('user_id', id);
+    if (fErr && (fErr.code === '42703' || fErr.code === 'PGRST204')) {
+      // Ignore if is_hod column does not exist on faculty table
+    }
+    const { error: uErr } = await supabase.from('users').update({ is_hod: !!is_hod }).eq('id', id);
+    if (uErr && (uErr.code === '42703' || uErr.code === 'PGRST204')) {
+      // Ignore if is_hod column does not exist on users table
+    }
   }
 
   // Clear cache
@@ -644,20 +619,79 @@ router.patch('/faculty/:id', hodMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
-// DELETE /api/admin/faculty/:id - Delete faculty (HOD only)
-router.delete('/faculty/:id', hodMiddleware, async (req, res) => {
+// DELETE /api/admin/faculty/:id - Delete faculty (Admin only)
+router.delete('/faculty/:id', strictAdminMiddleware, async (req, res) => {
   const { id } = req.params;
-  
-  // Prevent self-deletion
+
+  // 1. Self-deletion protection
   if (id === req.user.id) {
-    return res.status(400).json({ error: 'Cannot delete yourself' });
+    return res.status(400).json({ error: 'Cannot delete your own account' });
   }
 
-  const { error } = await supabase.from('users').delete().eq('id', id);
-  if (error) return res.status(500).json({ error: 'Failed to delete faculty.', details: error.message });
-  
-  await cache.del('admin:faculty');
-  res.json({ message: 'Faculty deleted successfully.' });
+  // 2. Try RPC first if available
+  const { data: rpcRes, error: rpcErr } = await supabase.rpc('delete_faculty_member', { p_target_user_id: id });
+
+  if (!rpcErr && rpcRes) {
+    if (rpcRes.success) {
+      await cache.del('admin:faculty');
+      return res.json({ message: rpcRes.message || 'Faculty deleted successfully.' });
+    }
+    const statusCode = rpcRes.code === 'NOT_FOUND' ? 404 : (rpcRes.code?.startsWith('FORBIDDEN') ? 403 : 400);
+    return res.status(statusCode).json({ error: rpcRes.message });
+  }
+
+  // 3. FALLBACK: Server-Side Deletion Service if RPC is unavailable (PGRST202 or 42883)
+  if (rpcErr && (rpcErr.code === 'PGRST202' || rpcErr.code === '42883' || rpcErr.message?.includes('could not find the function'))) {
+    // Verify target user role & existence in users table
+    const { data: targetUser, error: userFetchErr } = await supabase
+      .from('users')
+      .select('id, role')
+      .eq('id', id)
+      .single();
+
+    if (userFetchErr || !targetUser) {
+      return res.status(404).json({ error: 'Target user not found.' });
+    }
+
+    if (targetUser.role === 'admin') {
+      return res.status(403).json({ error: 'Cannot delete an administrator account.' });
+    }
+
+    if (targetUser.role !== 'faculty') {
+      return res.status(403).json({ error: 'Target user is not a faculty member.' });
+    }
+
+    // Unlink achievements approved by this faculty (approved_by = NULL)
+    await supabase
+      .from('achievements')
+      .update({ approved_by: null })
+      .eq('approved_by', id);
+
+    // Delete faculty profile by user_id
+    const { error: facDelErr } = await supabase
+      .from('faculty')
+      .delete()
+      .eq('user_id', id);
+
+    if (facDelErr) {
+      return res.status(500).json({ error: 'Failed to delete faculty record.', details: facDelErr.message });
+    }
+
+    // Delete user account by id
+    const { error: userDelErr } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', id);
+
+    if (userDelErr) {
+      return res.status(500).json({ error: 'Failed to delete user account.', details: userDelErr.message });
+    }
+
+    await cache.del('admin:faculty');
+    return res.json({ success: true, message: 'Faculty deleted successfully.' });
+  }
+
+  return res.status(500).json({ error: 'Failed to delete faculty member.', details: rpcErr?.message });
 });
 
 // ─── Admin Overview ────────────────────────────────────────────────────────
@@ -765,113 +799,27 @@ router.get('/advisor/dashboard', facultyAdvisorMiddleware, async (req, res) => {
   });
 });
 
+// POST /api/admin/notify & /api/admin/announcements - Broadcast announcement (Admin/HOD only)
+const announcementsRouter = require('./announcements');
+
+const handleCreateAnnouncement = async (req, res, next) => {
+  req.url = '/';
+  return announcementsRouter(req, res, next);
+};
+
+const handleDeleteAnnouncement = async (req, res, next) => {
+  return announcementsRouter(req, res, next);
+};
+
+router.post('/notify', hodMiddleware, handleCreateAnnouncement);
+router.post('/announcements', hodMiddleware, handleCreateAnnouncement);
+router.delete('/notify/:id', hodMiddleware, handleDeleteAnnouncement);
+router.delete('/announcements/:id', hodMiddleware, handleDeleteAnnouncement);
+
 // ─── Admin: Clear Cache ──────────────────────────────────────────────────────
 router.post('/clear-cache', hodMiddleware, async (req, res) => {
   await cache.flush();
   res.json({ message: 'Cache cleared successfully' });
 });
 
-// ─── Admin: Post & Notify (Announcements) ────────────────────────────────────
-const {
-  getAdminAnnouncements,
-  createAnnouncement,
-  updateAnnouncement,
-  deleteAnnouncement,
-  getAnnouncementStorageStatus
-} = require('../services/announcementStore');
-
-// GET /api/admin/announcements/storage-status - Check if persistent table exists or temporary fallback mode is active
-router.get('/announcements/storage-status', async (req, res) => {
-  try {
-    const status = await getAnnouncementStorageStatus();
-    res.json(status);
-  } catch (err) {
-    res.status(500).json({
-      storage_mode: 'temporary',
-      persistent: false,
-      warning: 'Persistent announcement storage is not configured. Posts created in temporary mode may disappear after server restart.'
-    });
-  }
-});
-
-// GET /api/admin/announcements - Fetch all posts (active & inactive)
-router.get('/announcements', async (req, res) => {
-  try {
-    const data = await getAdminAnnouncements();
-    res.json(data || []);
-  } catch (err) {
-    console.error('Admin announcements fetch error:', err);
-    res.status(500).json({ error: 'Failed to fetch announcements' });
-  }
-});
-
-// POST /api/admin/announcements - Create a new post
-router.post('/announcements', async (req, res) => {
-  try {
-    const { title, content, image_url, category, is_active } = req.body;
-
-    if (!title || !title.trim() || !content || !content.trim()) {
-      return res.status(400).json({ error: 'Title and content/message are required.' });
-    }
-
-    const newPost = {
-      title: title.trim(),
-      content: content.trim(),
-      image_url: image_url?.trim() || null,
-      category: category || 'General',
-      is_active: is_active !== undefined ? Boolean(is_active) : true,
-      created_by: req.user.id,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    const data = await createAnnouncement(newPost);
-    res.status(201).json(data);
-  } catch (err) {
-    console.error('Create announcement exception:', err);
-    if (req.body.image_url) {
-      try {
-        const { deleteUploadedFileFromUrl } = require('./uploads');
-        deleteUploadedFileFromUrl('department-posts', req.body.image_url).catch(() => {});
-      } catch (e) {}
-    }
-    res.status(500).json({ error: 'Unable to publish announcement right now. Please try again.' });
-  }
-});
-
-// PATCH /api/admin/announcements/:id - Update post / toggle status
-router.patch('/announcements/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updates = {};
-    const { title, content, image_url, category, is_active } = req.body;
-
-    if (title !== undefined) updates.title = title.trim();
-    if (content !== undefined) updates.content = content.trim();
-    if (image_url !== undefined) updates.image_url = image_url?.trim() || null;
-    if (category !== undefined) updates.category = category;
-    if (is_active !== undefined) updates.is_active = Boolean(is_active);
-    updates.updated_at = new Date().toISOString();
-
-    const data = await updateAnnouncement(id, updates);
-    res.json(data);
-  } catch (err) {
-    console.error('Update announcement exception:', err);
-    res.status(500).json({ error: 'Unable to update announcement right now. Please try again.' });
-  }
-});
-
-// DELETE /api/admin/announcements/:id - Delete an announcement
-router.delete('/announcements/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    await deleteAnnouncement(id);
-    res.json({ message: 'Announcement deleted successfully' });
-  } catch (err) {
-    console.error('Delete announcement exception:', err);
-    res.status(500).json({ error: 'Unable to delete announcement right now. Please try again.' });
-  }
-});
-
 module.exports = router;
-

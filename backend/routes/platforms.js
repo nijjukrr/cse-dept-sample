@@ -1,366 +1,323 @@
-/**
- * SSIET CSE Department - Platform Integration Routes
- * Manages external developer & competitive programming accounts, synchronization,
- * and verification.
- */
-
 const express = require('express');
 const router = express.Router();
 const { authMiddleware } = require('../middleware/auth');
-const { getAllPlatforms, getPlatformMeta, getAdapter } = require('../platforms');
-const { platformStore } = require('../services/platformStore');
-const { syncService } = require('../services/syncService');
-const { normalizationEngine } = require('../services/normalizationEngine');
+const { supabase, getAdminScope } = require('../db/supabase');
+const platformStore = require('../services/platformStore');
+const platformSyncService = require('../services/platformSyncService');
+const { calculateUserCompetitiveScore } = require('../services/competitiveScoreService');
 
 // ─── GET /api/platforms ───────────────────────────────────────────────────────
-// Returns all supported platform definitions and metadata
-router.get('/', (req, res) => {
-  res.json(getAllPlatforms());
-});
-
-// ─── GET /api/platforms/meta/:platformCode ────────────────────────────────────
-router.get('/meta/:platformCode', (req, res) => {
-  const meta = getPlatformMeta(req.params.platformCode);
-  if (!meta) return res.status(404).json({ error: 'Platform not found' });
-  res.json(meta);
-});
-
-// ─── GET /api/platforms/student/:userId and /api/platforms/users/:userId ─────
-async function handleGetStudentPlatforms(req, res) {
+router.get('/', authMiddleware, async (req, res, next) => {
   try {
-    const userId = req.params.userId;
-    const [connections, compProfile] = await Promise.all([
-      platformStore.getStudentConnections(userId),
-      platformStore.getCompetitiveProfile(userId),
-    ]);
+    const state = await platformSyncService.getPlatformsState(req.user.id);
+    res.json(state);
+  } catch (err) {
+    next(err);
+  }
+});
 
-    const result = connections.map((conn) => {
-      const meta = getPlatformMeta(conn.platform_code) || {};
-      const freshness = normalizationEngine.getFreshnessStatus(conn.last_synced_at);
+// ─── GET /api/platforms/leaderboard ──────────────────────────────────────────
+router.get('/leaderboard', authMiddleware, async (req, res, next) => {
+  try {
+    const { batch, class: cls } = req.query;
+
+    const { connections } = await platformStore.getAllPlatformConnections();
+
+    const userConnsMap = new Map();
+    for (const conn of connections) {
+      const uid = conn.user_id;
+      if (!userConnsMap.has(uid)) {
+        userConnsMap.set(uid, []);
+      }
+      userConnsMap.get(uid).push(conn);
+    }
+
+    let studentQuery = supabase
+      .from('students')
+      .select('user_id, name, roll_no, class, batch, avatar_url');
+
+    if (batch && batch !== 'all') studentQuery = studentQuery.eq('batch', batch);
+    if (cls && cls !== 'all') studentQuery = studentQuery.eq('class', cls);
+
+    const { data: students, error: studentErr } = await studentQuery;
+    if (studentErr) {
+      console.error('Failed to fetch students for competitive leaderboard:', studentErr);
+      return res.status(500).json({ error: 'Failed to fetch student profile data.' });
+    }
+
+    const studentList = students || [];
+
+    const leaderboard = studentList.map(s => {
+      const userConns = userConnsMap.get(s.user_id) || [];
+      const scoreObj = calculateUserCompetitiveScore(userConns);
+      const totalProblems = scoreObj.easySolved + scoreObj.mediumSolved + scoreObj.hardSolved;
+
       return {
-        ...conn,
-        platform_name: meta.name || conn.platform_code,
-        brand_color: meta.brandColor,
-        accent_color: meta.accentColor,
-        category: meta.category,
-        category_label: meta.categoryLabel,
-        freshness,
+        userId: s.user_id,
+        name: s.name || 'Unknown Student',
+        rollNo: s.roll_no || s.rollNo || null,
+        avatarUrl: s.avatar_url || null,
+        batch: s.batch || null,
+        class: s.class || null,
+        easySolved: scoreObj.easySolved,
+        mediumSolved: scoreObj.mediumSolved,
+        hardSolved: scoreObj.hardSolved,
+        totalProblems,
+        easyPoints: scoreObj.easyPoints,
+        mediumPoints: scoreObj.mediumPoints,
+        hardPoints: scoreObj.hardPoints,
+        totalScore: scoreObj.totalScore,
+        platformBreakdown: scoreObj.platformBreakdown
       };
     });
 
-    // Support both direct array format and { platforms, competitive_profile } shape
-    if (req.path.startsWith('/users/')) {
-      return res.json({
-        platforms: result,
-        competitive_profile: compProfile,
-      });
-    }
-
-    res.json(result);
-  } catch (err) {
-    console.error('Error fetching student connections:', err);
-    res.status(500).json({ error: 'Failed to fetch student platforms' });
-  }
-}
-
-router.get('/student/:userId', handleGetStudentPlatforms);
-router.get('/users/:userId', handleGetStudentPlatforms);
-
-// ─── POST /api/platforms/users/:userId/:platformCode/sync ─────────────────────
-router.post('/users/:userId/:platformCode/sync', authMiddleware, async (req, res) => {
-  const targetId = req.params.userId;
-  if (req.user.id !== targetId && req.user.role === 'student') {
-    return res.status(403).json({ error: "Cannot sync another user's platform" });
-  }
-  const result = await syncService.syncStudentPlatform(targetId, req.params.platformCode);
-  if (!result.success) {
-    if (result.isCooldown) {
-      return res.status(429).json({ error: result.error, remainingSeconds: result.remainingSeconds });
-    }
-    return res.status(400).json({ error: result.error });
-  }
-  res.json({ message: 'Synchronized successfully', connection: result.connection });
-});
-
-// ─── DELETE /api/platforms/users/:userId/:platformCode ────────────────────────
-router.delete('/users/:userId/:platformCode', authMiddleware, async (req, res) => {
-  const targetId = req.params.userId;
-  if (req.user.id !== targetId && req.user.role === 'student') {
-    return res.status(403).json({ error: "Cannot disconnect another user's platform" });
-  }
-  await platformStore.deleteStudentConnection(targetId, req.params.platformCode);
-  await syncService.recalculateStudentProfile(targetId);
-  res.json({ message: 'Disconnected successfully' });
-});
-
-// ─── POST /api/platforms/connect ──────────────────────────────────────────────
-// Connect an external platform handle for the authenticated student
-router.post('/connect', authMiddleware, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { platform_code, username } = req.body;
-
-    if (!platform_code || !username) {
-      return res.status(400).json({ error: 'platform_code and username are required' });
-    }
-
-    const meta = getPlatformMeta(platform_code);
-    const adapter = getAdapter(platform_code);
-
-    if (!meta || !adapter) {
-      return res.status(400).json({ error: `Unsupported platform: ${platform_code}` });
-    }
-
-    // 1. Anti-manipulation: Validate username handle structure
-    const check = adapter.validateUsername(username);
-    if (!check.isValid) {
-      return res.status(400).json({ error: check.reason });
-    }
-
-    const cleanUsername = check.cleanUsername;
-    const profileUrl = meta.profileUrlTemplate.replace('{username}', cleanUsername);
-
-    // 2. Create / Upsert initial connection record
-    const conn = await platformStore.upsertStudentConnection({
-      user_id: userId,
-      platform_code,
-      username: cleanUsername,
-      profile_url: profileUrl,
-      connection_status: 'connected',
-      verification_level: meta.verificationLevel || 'public_linked',
-      sync_status: 'syncing',
-      raw_metrics: {},
-      normalized_metrics: {},
-      platform_score: 0,
+    leaderboard.sort((a, b) => {
+      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+      if (b.totalProblems !== a.totalProblems) return b.totalProblems - a.totalProblems;
+      return a.name.localeCompare(b.name);
     });
 
-    // 3. Trigger initial synchronization immediately
-    const syncRes = await syncService.syncStudentPlatform(userId, platform_code, true);
-
-    res.status(201).json({
-      message: `Successfully connected ${meta.name}`,
-      connection: syncRes.connection || conn,
-      syncResult: syncRes,
+    leaderboard.forEach((entry, idx) => {
+      entry.rank = idx + 1;
     });
+
+    res.json({ success: true, leaderboard });
   } catch (err) {
-    console.error('Platform connect error:', err);
-    res.status(500).json({ error: 'Failed to connect platform' });
+    next(err);
   }
 });
 
-// ─── POST /api/platforms/sync/:platformCode ───────────────────────────────────
-// Manually refresh / sync an external platform for the authenticated user
-router.post('/sync/:platformCode', authMiddleware, async (req, res) => {
+// ─── GET /api/platforms/admin/connections ────────────────────────────────────
+router.get('/admin/connections', authMiddleware, async (req, res, next) => {
   try {
-    const userId = req.user.id;
-    const platformCode = req.params.platformCode;
+    const isAuthorized = req.user && (req.user.is_admin || req.user.role === 'admin' || req.user.role === 'faculty');
+    if (!isAuthorized) {
+      return res.status(403).json({ error: 'Only faculty and admins may view platform connections.' });
+    }
 
-    const result = await syncService.syncStudentPlatform(userId, platformCode);
+    const scope = await getAdminScope(req.user.id, req.user.role);
 
-    if (!result.success) {
-      if (result.isCooldown) {
-        return res.status(429).json({
-          error: result.error,
-          remainingSeconds: result.remainingSeconds,
+    const { connections, error: connErr } = await platformStore.getAllPlatformConnections();
+    if (connErr) {
+      return res.status(500).json({ error: 'Failed to fetch platform connections.' });
+    }
+
+    let studentQuery = supabase
+      .from('students')
+      .select('user_id, name, roll_no, class, batch');
+
+    if (!scope.hasFullAccess) {
+      if (!scope.advisingClass || !scope.advisingBatch) {
+        return res.json({ success: true, connections: [] });
+      }
+      studentQuery = studentQuery.eq('class', scope.advisingClass).eq('batch', scope.advisingBatch);
+    }
+
+    const { data: students, error: studentErr } = await studentQuery;
+    if (studentErr) {
+      return res.status(500).json({ error: 'Failed to fetch student profile data.' });
+    }
+
+    const studentMap = new Map();
+    if (students) {
+      students.forEach(s => studentMap.set(s.user_id, s));
+    }
+
+    const result = [];
+    for (const conn of (connections || [])) {
+      if (studentMap.has(conn.user_id)) {
+        const student = studentMap.get(conn.user_id);
+        result.push({
+          userId: conn.user_id,
+          studentName: student.name || 'Unknown Student',
+          rollNo: student.roll_no || student.rollNo || null,
+          class: student.class || null,
+          batch: student.batch || null,
+          platformCode: conn.platform_code,
+          handle: conn.handle,
+          normalizedHandle: conn.normalized_handle,
+          ownershipVerified: Boolean(conn.ownership_verified),
+          status: conn.status,
+          lastSyncedAt: conn.last_synced_at,
+          lastAttemptedAt: conn.last_attempted_at,
+          lastErrorCode: conn.last_error_code,
+          metrics: conn.metrics
         });
       }
-      return res.status(400).json({
+    }
+
+    res.json({ success: true, connections: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /api/platforms/admin/verify ─────────────────────────────────────────
+router.post('/admin/verify', authMiddleware, async (req, res, next) => {
+  try {
+    const isAuthorized = req.user && (req.user.is_admin || req.user.role === 'admin' || req.user.role === 'faculty');
+    if (!isAuthorized) {
+      return res.status(403).json({ error: 'Only faculty and admins may verify platform connections.' });
+    }
+
+    const { userId, platformCode, verified } = req.body;
+    if (!userId || !platformCode) {
+      return res.status(400).json({ error: 'userId and platformCode are required.' });
+    }
+
+    const scope = await getAdminScope(req.user.id, req.user.role);
+    if (!scope.hasFullAccess) {
+      if (!scope.advisingClass || !scope.advisingBatch) {
+        return res.status(403).json({ error: 'You are not assigned to advise any class or batch.' });
+      }
+
+      const { data: targetStudent, error: studentErr } = await supabase
+        .from('students')
+        .select('user_id, class, batch')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (studentErr || !targetStudent) {
+        return res.status(404).json({ error: 'Target student profile not found.' });
+      }
+
+      if (targetStudent.class !== scope.advisingClass || targetStudent.batch !== scope.advisingBatch) {
+        return res.status(403).json({ error: 'You can only verify platform connections for students in your assigned class and batch.' });
+      }
+    }
+
+    const result = await platformStore.updateConnectionStatus(userId, platformCode, {
+      ownership_verified: Boolean(verified)
+    });
+
+    if (result.error) {
+      return res.status(500).json({ error: 'Failed to update platform verification status.' });
+    }
+
+    // Invalidate competitive leaderboard and platform state caches
+    const cache = require('../services/cache');
+    await cache.delPrefix('platforms:');
+    await cache.delPrefix('leaderboard:');
+
+    res.json({ success: true, connection: result.connection });
+  } catch (err) {
+    next(err);
+  }
+});
+
+function studentOnlyMiddleware(req, res, next) {
+  const isNonStudent = req.user && (req.user.is_admin || req.user.role === 'admin' || req.user.role === 'faculty');
+  if (isNonStudent) {
+    return res.status(403).json({ error: 'Platform connections can only be managed by students.' });
+  }
+  next();
+}
+
+// ─── POST /api/platforms/connect ─────────────────────────────────────────────
+router.post('/connect', authMiddleware, studentOnlyMiddleware, async (req, res, next) => {
+  try {
+    const { platformCode, handle } = req.body;
+    if (!platformCode || !handle) {
+      return res.status(400).json({ error: 'Platform code and handle are required.' });
+    }
+
+    const result = await platformSyncService.connectPlatform(req.user.id, platformCode, handle);
+    if (result.status && result.status !== 200) {
+      return res.status(result.status).json({ error: result.error, cooldown: result.cooldown });
+    }
+
+    const cache = require('../services/cache');
+    await cache.delPrefix('platforms:');
+    await cache.delPrefix('leaderboard:');
+
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /api/platforms/sync ────────────────────────────────────────────────
+router.post('/sync', authMiddleware, studentOnlyMiddleware, async (req, res, next) => {
+  try {
+    const { platformCode } = req.body;
+    if (!platformCode) {
+      return res.status(400).json({ error: 'Platform code is required.' });
+    }
+
+    const result = await platformSyncService.syncPlatform(req.user.id, platformCode);
+    if (result.status && result.status !== 200) {
+      return res.status(result.status).json({
         error: result.error,
-        retainedPrevious: result.retainedPrevious,
+        cooldown: result.cooldown,
+        syncError: result.syncError,
+        connection: result.connection
       });
     }
 
-    res.json({
-      message: `Synchronized ${platformCode} successfully`,
-      connection: result.connection,
-      normalizedMetrics: result.normalizedMetrics,
-    });
+    const cache = require('../services/cache');
+    await cache.delPrefix('platforms:');
+    await cache.delPrefix('leaderboard:');
+
+    res.status(200).json(result);
   } catch (err) {
-    console.error('Platform sync error:', err);
-    res.status(500).json({ error: 'Sync failed' });
+    next(err);
   }
 });
 
-// ─── DELETE /api/platforms/disconnect/:platformCode ───────────────────────────
-// Disconnect an external platform
-router.delete('/disconnect/:platformCode', authMiddleware, async (req, res) => {
+// ─── POST /api/platforms/sync-stale ───────────────────────────────────────────
+router.post('/sync-stale', authMiddleware, studentOnlyMiddleware, async (req, res, next) => {
   try {
-    const userId = req.user.id;
-    const platformCode = req.params.platformCode;
-
-    await platformStore.deleteStudentConnection(userId, platformCode);
-    // Recalculate profile score after disconnecting
-    await syncService.recalculateStudentProfile(userId);
-
-    res.json({ message: `Disconnected ${platformCode} successfully` });
+    const result = await platformSyncService.syncStalePlatforms(req.user.id);
+    if (result.synced) {
+      const cache = require('../services/cache');
+      await cache.delPrefix('platforms:');
+      await cache.delPrefix('leaderboard:');
+    }
+    res.status(200).json(result);
   } catch (err) {
-    console.error('Platform disconnect error:', err);
-    res.status(500).json({ error: 'Failed to disconnect platform' });
+    next(err);
   }
 });
 
-// ─── POST /api/platforms/verify ───────────────────────────────────────────────
-// Real account verification diagnostic endpoint for developers / administrators
-router.post('/verify', authMiddleware, async (req, res) => {
+// ─── POST /api/platforms/verify ──────────────────────────────────────────────
+router.post('/verify', authMiddleware, studentOnlyMiddleware, async (req, res, next) => {
   try {
-    const { platform, username } = req.body || {};
-    if (!platform || !username) {
-      return res.status(400).json({ error: 'Platform and username are required' });
-    }
-    const meta = getPlatformMeta(platform);
-    const adapter = getAdapter(platform);
-    if (!meta || !adapter) {
-      return res.status(400).json({ error: `Platform '${platform}' is not supported` });
+    const { platformCode } = req.body;
+    if (!platformCode) {
+      return res.status(400).json({ error: 'Platform code is required.' });
     }
 
-    const val = adapter.validateUsername(username);
-    if (!val.isValid) {
-      return res.status(400).json({ error: val.reason });
+    const result = await platformSyncService.verifyPlatform(req.user.id, platformCode);
+    if (result.status && result.status !== 200) {
+      return res.status(result.status).json({ error: result.error, success: false });
     }
 
-    const profileRes = await adapter.fetchProfile(val.cleanUsername);
-    if (!profileRes.success) {
-      return res.json({
-        exists: false,
-        verification_status: 'unverified',
-        metrics_available: false,
-        source: meta.sourceType || 'unsupported',
-        error: profileRes.error,
-        errorCategory: profileRes.errorCategory,
-      });
-    }
+    const cache = require('../services/cache');
+    await cache.delPrefix('platforms:');
+    await cache.delPrefix('leaderboard:');
 
-    const isLiveVerified = meta.integrationStatus === 'verified_live';
-    res.json({
-      exists: true,
-      username: val.cleanUsername,
-      profile_url: profileRes.data?.profileUrl || `${meta.profileUrlTemplate.replace('{username}', val.cleanUsername)}`,
-      verification_status: isLiveVerified ? 'verified_public_api' : 'public_profile_linked',
-      metrics_available: isLiveVerified,
-      source: meta.sourceType || 'unsupported',
-      integration_status: meta.integrationStatus,
-      note: meta.note || '',
-    });
+    res.status(200).json(result);
   } catch (err) {
-    console.error('Platform verify error:', err);
-    res.status(500).json({ error: 'Verification failed' });
+    next(err);
   }
 });
 
-const crypto = require('crypto');
-
-// ─── POST /api/platforms/verify/start ─────────────────────────────────────────
-// Starts the challenge-based verification process
-router.post('/verify/start', authMiddleware, async (req, res) => {
+// ─── DELETE /api/platforms/:platformCode ──────────────────────────────────────
+router.delete('/:platformCode', authMiddleware, studentOnlyMiddleware, async (req, res, next) => {
   try {
-    const userId = req.user.id;
-    const { platform_code } = req.body;
-    
-    if (!platform_code) {
-      return res.status(400).json({ error: 'platform_code is required' });
+    const { platformCode } = req.params;
+    const result = await platformSyncService.disconnectPlatform(req.user.id, platformCode);
+    if (result.status && result.status !== 200) {
+      return res.status(result.status).json({ error: result.error });
     }
 
-    const connections = await platformStore.getStudentConnections(userId);
-    const conn = connections.find(c => c.platform_code === platform_code);
-    
-    if (!conn) {
-      return res.status(404).json({ error: 'Platform connection not found' });
-    }
+    const cache = require('../services/cache');
+    await cache.delPrefix('platforms:');
+    await cache.delPrefix('leaderboard:');
 
-    // Generate challenge token
-    const token = `SSIET-VERIFY-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-    
-    conn.verification_token = token;
-    conn.ownership_status = 'pending';
-    conn.verification_started_at = new Date().toISOString();
-    
-    await platformStore.upsertStudentConnection(conn);
-    
-    const meta = getPlatformMeta(platform_code);
-    
-    // Provide hints on where to put the token based on platform
-    let placementHint = 'your profile bio';
-    if (platform_code === 'leetcode') placementHint = 'your "About Me" section';
-    if (platform_code === 'codeforces') placementHint = 'your First Name or Last Name';
-    
-    res.json({
-      message: 'Verification started',
-      verification_token: token,
-      placement_hint: placementHint,
-      platform_name: meta.name
-    });
+    res.status(200).json(result);
   } catch (err) {
-    console.error('Verify start error:', err);
-    res.status(500).json({ error: 'Failed to start verification process' });
-  }
-});
-
-// ─── POST /api/platforms/verify/confirm ───────────────────────────────────────
-// Confirms the challenge-based verification process
-router.post('/verify/confirm', authMiddleware, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { platform_code } = req.body;
-    
-    if (!platform_code) {
-      return res.status(400).json({ error: 'platform_code is required' });
-    }
-
-    const connections = await platformStore.getStudentConnections(userId);
-    const conn = connections.find(c => c.platform_code === platform_code);
-    
-    if (!conn) {
-      return res.status(404).json({ error: 'Platform connection not found' });
-    }
-
-    if (conn.ownership_status !== 'pending' || !conn.verification_token) {
-      return res.status(400).json({ error: 'No active verification process for this platform' });
-    }
-
-    const adapter = getAdapter(platform_code);
-    if (!adapter) {
-      return res.status(400).json({ error: `Unsupported platform: ${platform_code}` });
-    }
-
-    const profileRes = await adapter.fetchProfile(conn.username);
-    
-    if (!profileRes.success) {
-      return res.status(400).json({ error: 'Failed to fetch platform profile to verify', details: profileRes.error });
-    }
-
-    const profileData = profileRes.data;
-    const token = conn.verification_token;
-    
-    // Check various text fields where the user could have placed the token
-    const textToSearch = [
-      profileData.bio,
-      profileData.aboutMe,
-      profileData.firstName,
-      profileData.lastName,
-      profileData.name // Fallback for GitHub 'name'
-    ].filter(Boolean).join(' ').toUpperCase();
-
-    if (textToSearch.includes(token.toUpperCase())) {
-      conn.ownership_status = 'verified';
-      conn.verified_at = new Date().toISOString();
-      conn.verification_token = null; // Clear token after success
-      
-      await platformStore.upsertStudentConnection(conn);
-      
-      return res.json({
-        message: 'Account ownership verified successfully',
-        ownership_status: 'verified'
-      });
-    } else {
-      return res.status(400).json({ 
-        error: 'Verification token not found on profile',
-        message: 'Please ensure you saved the token exactly as shown in the specified field.'
-      });
-    }
-    
-  } catch (err) {
-    console.error('Verify confirm error:', err);
-    res.status(500).json({ error: 'Failed to confirm verification process' });
+    next(err);
   }
 });
 
