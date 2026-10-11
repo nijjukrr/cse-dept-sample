@@ -17,39 +17,38 @@ const allowedOrigins = process.env.FRONTEND_URL
   : [];
 const isDev = (process.env.NODE_ENV === 'development' || process.env.APP_ENV === 'development') && !process.env.FRONTEND_URL;
 
-app.use(cors({
-  origin: function (origin, callback) {
-    // 1. Allow non-browser / health tooling requests (no Origin header)
-    if (!origin) {
-      return callback(null, true);
-    }
-    // 2. Allow if explicitly present in FRONTEND_URL whitelist
-    if (allowedOrigins.length > 0 && allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    // 3. Permissive ONLY in un-configured local development mode
-    if (isDev) {
-      return callback(null, true);
-    }
-    callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true
+app.use(cors((req, callback) => {
+  const origin = req.header('Origin');
+  const forwardedProtocol = req.header('x-forwarded-proto');
+  const protocol = forwardedProtocol ? forwardedProtocol.split(',')[0].trim() : req.protocol;
+  const sameOrigin = `${protocol}://${req.get('host')}`;
+  const allowOrigin = !origin
+    || origin === sameOrigin
+    || allowedOrigins.includes(origin)
+    || isDev;
+
+  callback(null, {
+    origin: allowOrigin,
+    credentials: true
+  });
 }));
 
 app.use(express.json());
 
 // Routes
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/users', require('./routes/users'));
-app.use('/api/achievements', require('./routes/achievements'));
-app.use('/api/leaderboard', require('./routes/leaderboard'));
-app.use('/api/teams', require('./routes/teams'));
-app.use('/api/updates', require('./routes/updates'));
-app.use('/api/admin', require('./routes/admin'));
-app.use('/api/uploads', require('./routes/uploads').router);
-app.use('/api/platforms', require('./routes/platforms'));
-app.use('/api/announcements', require('./routes/announcements'));
-app.use('/api/academics', require('./routes/academics'));
+const asRouter = (loadedModule) => loadedModule.router || loadedModule.default || loadedModule;
+
+app.use('/api/auth', asRouter(require('./routes/auth')));
+app.use('/api/users', asRouter(require('./routes/users')));
+app.use('/api/achievements', asRouter(require('./routes/achievements')));
+app.use('/api/leaderboard', asRouter(require('./routes/leaderboard')));
+app.use('/api/teams', asRouter(require('./routes/teams')));
+app.use('/api/updates', asRouter(require('./routes/updates')));
+app.use('/api/admin', asRouter(require('./routes/admin')));
+app.use('/api/uploads', asRouter(require('./routes/uploads')));
+app.use('/api/platforms', asRouter(require('./routes/platforms')));
+app.use('/api/announcements', asRouter(require('./routes/announcements')));
+app.use('/api/academics', asRouter(require('./routes/academics')));
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'SIET CSE Portal API is running 🚀', timestamp: new Date().toISOString() });
@@ -60,12 +59,14 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log('\n╔════════════════════════════════════════╗');
-  console.log('║   SIET CSE Department Portal API     ║');
-  console.log('║   Sri Shakthi Institute, Coimbatore   ║');
-  console.log(`║   Running on http://localhost:${PORT}    ║`);
-  console.log('╚════════════════════════════════════════╝\n');
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log('\n╔════════════════════════════════════════╗');
+    console.log('║   SIET CSE Department Portal API     ║');
+    console.log('║   Sri Shakthi Institute, Coimbatore   ║');
+    console.log(`║   Running on http://localhost:${PORT}    ║`);
+    console.log('╚════════════════════════════════════════╝\n');
+  });
+}
 
 module.exports = app;
