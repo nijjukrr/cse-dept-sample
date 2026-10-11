@@ -5,6 +5,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { UndoDeleteProvider } from './contexts/UndoDeleteContext';
 import Navbar from './components/Navbar';
 import Footer from './components/Footer';
+import MandatoryPasswordChangeModal from './components/MandatoryPasswordChangeModal';
 
 function lazyWithPreload(factory) {
   const Component = lazy(factory);
@@ -13,6 +14,8 @@ function lazyWithPreload(factory) {
 }
 
 const Landing = lazyWithPreload(() => import('./pages/Landing'));
+const Intro = lazyWithPreload(() => import('./pages/Intro'));
+const Showcase = lazyWithPreload(() => import('./pages/Showcase'));
 const Login = lazyWithPreload(() => import('./pages/Login'));
 const Profile = lazyWithPreload(() => import('./pages/Profile'));
 const Leaderboard = lazyWithPreload(() => import('./pages/Leaderboard'));
@@ -27,8 +30,8 @@ const Platforms = lazyWithPreload(() => import('./pages/Platforms'));
 const News = lazyWithPreload(() => import('./pages/News'));
 const ThemeSettings = lazyWithPreload(() => import('./pages/ThemeSettings'));
 
-const priorityPreloads = [Leaderboard, CompetitiveLeaderboard, Students, Updates, Platforms, News];
-const backgroundPreloads = [Landing, Login, Profile, Teams, Admin, Approvals, EditProfile, ThemeSettings];
+const priorityPreloads = [Leaderboard, CompetitiveLeaderboard, Students, Updates, Platforms, News, Showcase];
+const backgroundPreloads = [Landing, Intro, Login, Profile, Teams, Admin, Approvals, EditProfile, ThemeSettings];
 
 function preloadRoutes(routes) {
   routes.forEach((route) => {
@@ -50,6 +53,13 @@ function ProtectedRoute({ children, adminOnly = false }) {
   return children;
 }
 
+function FacultyOnlyRoute({ children }) {
+  const { user } = useAuth();
+  if (!user) return <Navigate to="/login" replace />;
+  if (user.role !== 'faculty') return <Navigate to="/" replace />;
+  return children;
+}
+
 function StudentOnlyRoute({ children }) {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
@@ -61,34 +71,36 @@ function AppContent() {
   const { user } = useAuth();
   const location = useLocation();
 
-  const isLoginPage = location.pathname === '/login';
-  const showHeaderFooter = Boolean(user) && !isLoginPage;
+  const isStandalonePage = location.pathname === '/login' || location.pathname === '/showcase';
+  const showHeaderFooter = Boolean(user) && !isStandalonePage;
 
   return (
     <>
+      <MandatoryPasswordChangeModal />
       {showHeaderFooter && <Navbar />}
       <Suspense fallback={<div className="p-4 text-center">Loading...</div>}>
         <Routes>
-          <Route path="/" element={<ProtectedRoute><Landing /></ProtectedRoute>} />
+          <Route path="/" element={user ? <Landing /> : <Intro />} />
+          <Route path="/showcase" element={<Showcase />} />
           <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
+          <Route path="/dashboard" element={<ProtectedRoute><Landing /></ProtectedRoute>} />
           <Route path="/updates" element={<StudentOnlyRoute><Updates /></StudentOnlyRoute>} />
           <Route path="/news" element={<ProtectedRoute><News /></ProtectedRoute>} />
           <Route path="/leaderboard" element={<ProtectedRoute><Leaderboard /></ProtectedRoute>} />
-          <Route path="/competitive-leaderboard" element={<ProtectedRoute><CompetitiveLeaderboard /></ProtectedRoute>} />
+          <Route path="/competitive-leaderboard" element={<Navigate to="/leaderboard?tab=competitive" replace />} />
           <Route path="/platforms" element={<ProtectedRoute><Platforms /></ProtectedRoute>} />
           <Route path="/teams" element={<ProtectedRoute><Teams /></ProtectedRoute>} />
-          <Route path="/students" element={<ProtectedRoute><Students /></ProtectedRoute>} />
+          <Route path="/students" element={<ProtectedRoute adminOnly><Students /></ProtectedRoute>} />
           <Route path="/profile/:id" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
           <Route path="/edit-profile" element={<ProtectedRoute><EditProfile /></ProtectedRoute>} />
           <Route path="/theme" element={<ProtectedRoute><ThemeSettings /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
-          <Route path="/approvals" element={<ProtectedRoute adminOnly><Approvals /></ProtectedRoute>} />
-          <Route path="*" element={<Navigate to={user ? "/" : "/login"} replace />} />
+          <Route path="/approvals" element={user?.role === 'faculty' ? <Navigate to="/admin?tab=approvals" replace /> : <Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to={user ? "/" : "/showcase"} replace />} />
         </Routes>
       </Suspense>
       {showHeaderFooter && <Footer />}
     </>
-
   );
 }
 

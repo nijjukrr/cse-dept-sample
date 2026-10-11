@@ -1,16 +1,22 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import client from '../api/client';
 import ScoreBadge from '../components/ScoreBadge';
 import CustomSelect from '../components/CustomSelect';
 import FilterModal from '../components/FilterModal';
-import { Users, Award, Trophy, Briefcase, Medal, ArrowUp, ArrowDown, Minus } from 'lucide-react';
+import CompetitiveLeaderboard from './CompetitiveLeaderboard';
+import CgpaLeaderboard from '../components/CgpaLeaderboard';
+import { Users, Award, Trophy, Briefcase, Medal, ArrowUp, ArrowDown, Minus, Code, GraduationCap } from 'lucide-react';
 import { subscribeAchievementEvents } from '../utils/achievementEvents';
 
 const BATCH_OPTIONS = ['2026-2030', '2025-2029', '2024-2028', '2023-2027', '2022-2026'];
 const CLASS_OPTIONS = ['CSE-A', 'CSE-B', 'CSE-C', 'CSE-D', 'CSE-E'];
 
 export default function Leaderboard() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const activeTab = tabParam === 'competitive' ? 'competitive' : tabParam === 'cgpa' ? 'cgpa' : 'achievement';
+
   const [students, setStudents] = useState([]);
   const [stats, setStats] = useState({ totalStudents: 0, totalAchievements: 0, totalHackathonWins: 0, totalInternships: 0 });
   const [loading, setLoading] = useState(true);
@@ -20,6 +26,14 @@ export default function Leaderboard() {
   const [showFilters, setShowFilters] = useState(false);
 
   const isFilterActive = (batchFilter && batchFilter !== 'all') || (classFilter && classFilter !== 'all');
+
+  const handleTabChange = (newTab) => {
+    if (newTab === 'achievement') {
+      setSearchParams({});
+    } else {
+      setSearchParams({ tab: newTab });
+    }
+  };
 
   const fetchLeaderboard = (showLoading = true) => {
     if (showLoading) {
@@ -55,7 +69,9 @@ export default function Leaderboard() {
   };
 
   useEffect(() => {
-    fetchLeaderboard(true);
+    if (activeTab === 'achievement') {
+      fetchLeaderboard(true);
+    }
 
     const unsubscribe = subscribeAchievementEvents((detail) => {
       const { action } = detail;
@@ -67,7 +83,7 @@ export default function Leaderboard() {
     return () => {
       unsubscribe();
     };
-  }, [batchFilter, classFilter]);
+  }, [batchFilter, classFilter, activeTab]);
 
   const top3 = students.slice(0, 3);
   const rest = students.slice(3);
@@ -77,11 +93,44 @@ export default function Leaderboard() {
       <div className="container">
         <div className="lb-header animate-fadeInUp">
           <h1 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Trophy size={28} className="text-gradient" /> <span className="text-gradient">Leaderboard</span></h1>
-          <p className="section-subtitle">Ranked by total points across SIET CSE Department</p>
+          <p className="section-subtitle">Department of Computer Science & Engineering — SIET</p>
         </div>
 
-        {/* Dept Stats */}
-        <div className="lb-stats-row animate-fadeInUp delay-1">
+        {/* UNIFIED LEADERBOARD TAB SWITCHER */}
+        <div className="animate-fadeInUp" style={{ marginBottom: 28 }}>
+          <div className="card" style={{ display: 'inline-flex', padding: 4, borderRadius: 'var(--radius-lg)', background: 'var(--bg-hover)', border: '1px solid var(--border)', flexWrap: 'wrap', gap: 4 }}>
+            <button
+              className={`btn btn-sm ${activeTab === 'achievement' ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => handleTabChange('achievement')}
+              style={{ borderRadius: 'var(--radius-md)', padding: '8px 18px', fontWeight: 700, fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 8 }}
+            >
+              <Award size={16} /> Achievement Leaderboard
+            </button>
+            <button
+              className={`btn btn-sm ${activeTab === 'competitive' ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => handleTabChange('competitive')}
+              style={{ borderRadius: 'var(--radius-md)', padding: '8px 18px', fontWeight: 700, fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 8 }}
+            >
+              <Code size={16} /> Competitive Coding Leaderboard
+            </button>
+            <button
+              className={`btn btn-sm ${activeTab === 'cgpa' ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => handleTabChange('cgpa')}
+              style={{ borderRadius: 'var(--radius-md)', padding: '8px 18px', fontWeight: 700, fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 8 }}
+            >
+              <GraduationCap size={16} /> Academic CGPA Leaderboard
+            </button>
+          </div>
+        </div>
+
+        {activeTab === 'competitive' ? (
+          <CompetitiveLeaderboard embedded={true} />
+        ) : activeTab === 'cgpa' ? (
+          <CgpaLeaderboard />
+        ) : (
+          <>
+            {/* Dept Stats */}
+            <div className="lb-stats-row animate-fadeInUp delay-1">
           {[
             { n: stats.totalStudents, l: 'Students', i: <Users size={24} /> },
             { n: stats.totalAchievements, l: 'Achievements', i: <Award size={24} /> },
@@ -98,7 +147,7 @@ export default function Leaderboard() {
 
         {/* Filters */}
         <div className="lb-filters animate-fadeInUp delay-2">
-          <button 
+          <button
             className={`btn ${isFilterActive ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setShowFilters(true)}
           >
@@ -107,8 +156,8 @@ export default function Leaderboard() {
           </button>
         </div>
 
-        <FilterModal 
-          isOpen={showFilters} 
+        <FilterModal
+          isOpen={showFilters}
           onClose={() => setShowFilters(false)}
           onClear={() => { setBatchFilter('all'); setClassFilter('all'); }}
         >
@@ -241,6 +290,8 @@ export default function Leaderboard() {
             })()}
           </>
         )}
+        </>
+        )}
       </div>
 
       <style>{`
@@ -264,7 +315,7 @@ export default function Leaderboard() {
         .podium-sname { font-size: 14px; font-weight: 700; margin-bottom: 2px; color: var(--color-text); }
         .podium-sclass { font-size: 12px; color: var(--color-text-muted); margin-bottom: 10px; }
         .podium-block { width: 140px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
-        
+
         @media (max-width: 640px) {
           .podium { gap: 8px; }
           .podium-col { transform: scale(0.85); transform-origin: bottom center; }
@@ -301,12 +352,12 @@ export default function Leaderboard() {
         .lb-score { font-size: 18px; font-weight: 900; font-family: 'Space Grotesk', sans-serif; color: var(--color-green); }
         @media (max-width: 640px) {
           .lb-table-header { display: none; }
-          .lb-row { 
-            display: flex; flex-wrap: wrap; 
-            padding: 16px; gap: 8px; 
-            border: 1px solid var(--border); 
-            border-radius: var(--radius-md); 
-            margin-bottom: 12px; 
+          .lb-row {
+            display: flex; flex-wrap: wrap;
+            padding: 16px; gap: 8px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            margin-bottom: 12px;
             position: relative;
           }
           .lb-row:last-child { border-bottom: 1px solid var(--border); }
